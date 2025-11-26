@@ -1,0 +1,29 @@
+[package]
+name = "ktulhuMain"
+version = "0.1.1"
+edition = "2021"
+
+[dependencies]
+anyhow = "1"
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+hf-hub = "0.3"
+tokenizers = "0.20"
+dirs = "5"
+candle-core = { version = "0.9.1", features = ["cuda"] }
+candle-nn = { version = "0.9.1", features = ["cuda"] }
+candle-transformers = { version = "0.9.1", features = ["cuda"] }
+axum = { version = "0.8", features = ["ws"] }
+axum-core = "0.4.3"
+axum-extra = { version = "0.9.2", features = ["typed-header"] }
+headers = "0.4"
+
+rocksdb = "0.24.0"
+jsonwebtoken = { version = "10.2.0", features = ["rust_crypto"]}
+tower-http = { version = "0.6.6", features = ["cors"] }
+tracing-subscriber = "0.3.20"
+async-trait = "0.1"
+chrono = "0.4.42"
+futures-util = "0.3"
+uuid = { version = "1", features = ["v4"] }

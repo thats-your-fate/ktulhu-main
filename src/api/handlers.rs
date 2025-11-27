@@ -6,7 +6,7 @@ use axum::{
 use crate::{
     api::types::MessagesResponse,
     api::types::{GenerateRequest, GenerateResponse},
-    ws::handler::AppState,
+    ws::AppState,
 };
 
 pub async fn generate_handler(

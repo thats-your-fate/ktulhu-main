@@ -73,6 +73,30 @@ pub fn build_ministral_prompt(history: &[Message], system_prompt: Option<&str>) 
     out
 }
 
+/// Build a compact prompt used for generating a short topic tag summary.
+pub fn build_summary_prompt(history: &[Message]) -> String {
+    // Focus the summary on the first user request to capture conversation intent.
+    let user_text = history
+        .iter()
+        .find(|m| m.role == "user")
+        .and_then(|m| m.text.clone())
+        // Fallback to latest user message if for some reason the first lacks text.
+        .or_else(|| {
+            history
+                .iter()
+                .rev()
+                .find(|m| m.role == "user")
+                .and_then(|m| m.text.clone())
+        })
+        .unwrap_or_default();
+
+    format!(
+        "Generate a 2–3 word topic tag for this conversation.\n\
+         Output ONLY the tag. No punctuation. No quotes.\n\n{}",
+        user_text
+    )
+}
+
 pub fn trim_history(mut history: Vec<Message>, max_messages: usize) -> Vec<Message> {
     if history.len() <= max_messages {
         return history;

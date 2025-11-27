@@ -3,7 +3,7 @@ use axum::{
     Extension, Router,
 };
 
-use crate::ws::handler::AppState;
+use crate::ws::AppState;
 
 pub mod handlers;
 pub mod types;

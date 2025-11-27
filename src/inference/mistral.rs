@@ -74,6 +74,7 @@ impl InferenceService {
             .map_err(|e| anyhow!("encode error: {}", e))?;
 
         let mut tokens = enc.get_ids().to_vec();
+        let prompt_len = tokens.len();
         let eos = self.tokenizer.token_to_id("</s>").unwrap_or(u32::MAX);
 
         let mut lp = LogitsProcessor::new(seed(), Some(0.7), None);
@@ -105,10 +106,15 @@ impl InferenceService {
             }
         }
 
-        let text = self
-            .tokenizer
-            .decode(&tokens, false)
-            .map_err(|e| anyhow!("decode error: {}", e))?;
+        // Decode only the newly generated portion, not the original prompt.
+        let gen_slice = &tokens[prompt_len..];
+        let text = if gen_slice.is_empty() {
+            String::new()
+        } else {
+            self.tokenizer
+                .decode(gen_slice, false)
+                .map_err(|e| anyhow!("decode error: {}", e))?
+        };
 
         Ok(text)
     }

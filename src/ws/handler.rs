@@ -4,6 +4,7 @@ use axum::{response::IntoResponse, routing::get, Router};
 
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
 use tokio::time::{timeout, Duration};
@@ -13,7 +14,8 @@ use crate::db::DBLayer;
 use crate::inference::InferenceService;
 use crate::model::chat::Chat;
 use crate::model::message::Message;
-use std::sync::atomic::{AtomicBool, Ordering};
+use crate::ws::inference_worker::{generate_summary_message, InferenceJob, InferenceWorker};
+use anyhow::anyhow;
 use uuid::Uuid;
 // ------------------------------------------------------------
 // TYPES
@@ -22,6 +24,7 @@ use uuid::Uuid;
 pub struct AppState {
     pub db: Arc<DBLayer>,
     pub infer: Arc<InferenceService>,
+    pub worker: InferenceWorker,
 }
 
 #[derive(Deserialize)]
@@ -148,9 +151,15 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                             .await
                             .unwrap_or_default();
 
-                        // Append new user message to history
+                        // Append new user message to history; tolerate missing request_id
+                        let msg_id = if parsed.request_id.is_empty() {
+                            Uuid::new_v4().to_string()
+                        } else {
+                            parsed.request_id.clone()
+                        };
+
                         let user_msg = Message {
-                            id: parsed.request_id.clone(),
+                            id: msg_id,
                             chat_id: chat_id.clone(),
                             session_id: Some(parsed.session_id.clone()),
                             user_id: None,
@@ -173,8 +182,27 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                         if let Err(err) = state.db.save_message(&user_msg).await {
                             eprintln!("failed to save user message {}: {err}", user_msg.id);
                         }
-                        let _ =
-                            touch_chat(&state.db, &chat_id, Some(parsed.device_hash.clone())).await;
+                        let has_summary =
+                            touch_chat(&state.db, &chat_id, Some(parsed.device_hash.clone()))
+                                .await
+                                .unwrap_or(true);
+
+                        // Kick off summary generation on first user request if missing
+                        if !has_summary {
+                            tokio::spawn({
+                                let db = state.db.clone();
+                                let infer = state.infer.clone();
+                                let chat_id = chat_id.clone();
+                                let ws_tx = tx.clone();
+                                async move {
+                                    if let Err(e) =
+                                        generate_summary_message(db, infer, chat_id, ws_tx).await
+                                    {
+                                        eprintln!("summary generation failed: {e}");
+                                    }
+                                }
+                            });
+                        }
 
                         // Share cancel flag
                         let cancel_flag = {
@@ -182,16 +210,21 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                             s.cancel.clone()
                         };
 
-                        // Spawn inference on formatted prompt
-                        spawn_inference_task(
-                            prompt_for_model,
-                            chat_id.clone(),
-                            parsed.session_id.clone(),
-                            tx.clone(),
-                            state.infer.clone(),
-                            state.db.clone(),
-                            cancel_flag,
-                        );
+                        // Queue inference for sequential worker execution
+                        let job = InferenceJob {
+                            prompt: prompt_for_model,
+                            chat_id: chat_id.clone(),
+                            session_id: parsed.session_id.clone(),
+                            sender: tx.clone(),
+                            infer: state.infer.clone(),
+                            db: state.db.clone(),
+                            cancel: cancel_flag,
+                        };
+
+                        if let Err(err) = state.worker.enqueue(job).await {
+                            eprintln!("failed to enqueue inference job: {err}");
+                            send_json(&tx, json_error("inference_unavailable")).await;
+                        }
                     }
 
                     MsgType::Cancel => {
@@ -273,92 +306,23 @@ fn json_system(event: &str) -> serde_json::Value {
 }
 
 // ------------------------------------------------------------
-// STREAMING INFERENCE TASK
+// STREAMING INFERENCE HELPERS
 // ------------------------------------------------------------
-fn spawn_inference_task(
-    prompt: String,
-    chat_id: String,
-    session_id: String,
-    sender: mpsc::Sender<WsMessage>,
-    infer: Arc<InferenceService>,
-    db: Arc<DBLayer>,
-    cancel: Arc<AtomicBool>,
-) {
-    tokio::spawn(async move {
-        let mut stream = infer.generate_stream(prompt, cancel.clone());
-
-        let mut assistant_reply = String::new();
-
-        while let Some(token) = stream.recv().await {
-            assistant_reply.push_str(&token);
-
-            let msg = serde_json::json!({
-                "type": "assistant",
-                "token": token
-            });
-
-            if cancel.load(Ordering::SeqCst) {
-                break;
-            }
-
-            if sender
-                .send(WsMessage::Text(msg.to_string().into()))
-                .await
-                .is_err()
-            {
-                break;
-            }
-        }
-
-        // Save assistant message
-        let assistant_msg = Message {
-            id: uuid::Uuid::new_v4().to_string(),
-            chat_id,
-            session_id: Some(session_id),
-            user_id: None,
-            device_hash: None,
-            role: "assistant".into(),
-            text: Some(assistant_reply.clone()),
-            ts: chrono::Utc::now().timestamp(),
-        };
-
-        if let Err(err) = db.save_message(&assistant_msg).await {
-            eprintln!(
-                "failed to save assistant message {}: {err}",
-                assistant_msg.id
-            );
-        }
-        let _ = touch_chat(&db, &assistant_msg.chat_id, None).await;
-
-        // Send done
-        let done_msg = serde_json::json!({
-            "type": "assistant",
-            "done": true
-        });
-
-        let _ = sender
-            .send(WsMessage::Text(done_msg.to_string().into()))
-            .await;
-    });
-}
-
-async fn ensure_chat_for_device(
+pub(crate) async fn ensure_chat_for_device(
     db: &DBLayer,
     chat_id: String,
     device_hash: String,
 ) -> anyhow::Result<String> {
+    if chat_id.is_empty() {
+        return Err(anyhow!("chat_id is required"));
+    }
+
     if let Some(_) = db.load_chat(&chat_id).await? {
         return Ok(chat_id);
     }
 
-    let new_id = if chat_id.is_empty() {
-        Uuid::new_v4().to_string()
-    } else {
-        chat_id
-    };
-
     let chat = Chat {
-        id: new_id.clone(),
+        id: chat_id.clone(),
         title: None,
         user_id: None,
         device_hash: Some(device_hash),
@@ -366,14 +330,21 @@ async fn ensure_chat_for_device(
         meta: None,
     };
     db.save_chat(&chat).await?;
-    Ok(new_id)
+    Ok(chat_id)
 }
 
-async fn touch_chat(
+pub(crate) async fn touch_chat(
     db: &DBLayer,
     chat_id: &str,
     device_hash: Option<String>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<bool> {
+    // Check if any summary already exists
+    let has_summary = db
+        .list_messages_for_chat(chat_id)
+        .await
+        .map(|msgs| msgs.iter().any(|m| m.role == "summary"))
+        .unwrap_or(false);
+
     let mut chat = db.load_chat(chat_id).await?.unwrap_or(Chat {
         id: chat_id.to_string(),
         title: None,
@@ -388,5 +359,5 @@ async fn touch_chat(
     }
     chat.updated_ts = chrono::Utc::now().timestamp();
     db.save_chat(&chat).await?;
-    Ok(())
+    Ok(has_summary)
 }

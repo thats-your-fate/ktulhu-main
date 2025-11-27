@@ -15,7 +15,7 @@ mod ws;
 
 use db::DBLayer;
 use inference::mistral::InferenceService;
-use ws::handler::AppState;
+use ws::{AppState, InferenceWorker};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -26,7 +26,7 @@ async fn main() -> anyhow::Result<()> {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
-    println!("🚀 Starting Mistral inference server...");
+    println!(" Starting Mistral inference server...");
 
     // -----------------------------
     // Shared state / Dependencies
@@ -34,7 +34,8 @@ async fn main() -> anyhow::Result<()> {
     let db = Arc::new(DBLayer::new("chatdb")?);
     let infer = Arc::new(InferenceService::new().await?);
 
-    let state = AppState { db, infer };
+    let worker = InferenceWorker::new(16);
+    let state = AppState { db, infer, worker };
 
     // -----------------------------
     // JWT secret — removed
@@ -66,9 +67,9 @@ async fn main() -> anyhow::Result<()> {
 
     let addr = "0.0.0.0:3000";
 
-    println!("🌐 HTTP listening on http://{addr}");
-    println!("🔌 WebSocket at ws://{addr}/ws");
-    println!("🛠 Internal API at http://{addr}/internal/generate");
+    println!(" HTTP listening on http://{addr}");
+    println!(" WebSocket at ws://{addr}/ws");
+    println!(" Internal API at http://{addr}/internal/generate");
 
     let listener = TcpListener::bind(addr).await?;
     axum::serve(listener, app.into_make_service()).await?;

@@ -1,10 +1,11 @@
 use crate::{
     internal_api::types::{InternalGenerateRequest, InternalGenerateResponse},
     model::chat::Chat,
-    ws::handler::AppState,
+    ws::AppState,
 };
 use axum::extract::{Json, Path, State};
 use serde_json::json;
+use std::cmp::Reverse;
 use uuid::Uuid;
 
 pub async fn internal_generate(
@@ -71,12 +72,52 @@ pub async fn list_chats_by_device(
 ) -> Json<serde_json::Value> {
     match state.db.list_chats_for_device(&device_hash).await {
         Ok(mut chats) => {
-            chats.sort_by_key(|c| c.updated_ts);
+            chats.sort_by_key(|c| Reverse(c.updated_ts));
+            let chats = chats
+                .into_iter()
+                .map(|c| {
+                    json!({
+                        "chat_id": c.id,
+                        "title": c.title,
+                        "user_id": c.user_id,
+                        "device_hash": c.device_hash,
+                        "updated_ts": c.updated_ts,
+                        "meta": c.meta
+                    })
+                })
+                .collect::<Vec<_>>();
+
             Json(json!({ "device_hash": device_hash, "chats": chats }))
         }
         Err(e) => Json(json!({
             "device_hash": device_hash,
             "chats": [],
+            "error": e.to_string()
+        })),
+    }
+}
+
+pub async fn list_messages_by_device(
+    Path(device_hash): Path<String>,
+    State(state): State<AppState>,
+) -> Json<serde_json::Value> {
+    match state.db.list_chats_for_device(&device_hash).await {
+        Ok(chats) => {
+            let mut messages = Vec::new();
+            for chat in chats {
+                if let Ok(mut msgs) = state.db.list_messages_for_chat(&chat.id).await {
+                    messages.append(&mut msgs);
+                }
+            }
+            messages.sort_by_key(|m| m.ts);
+            Json(json!({
+                "device_hash": device_hash,
+                "messages": messages,
+            }))
+        }
+        Err(e) => Json(json!({
+            "device_hash": device_hash,
+            "messages": [],
             "error": e.to_string()
         })),
     }

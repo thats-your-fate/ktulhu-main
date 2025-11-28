@@ -14,7 +14,7 @@ use crate::db::DBLayer;
 use crate::inference::InferenceService;
 use crate::model::chat::Chat;
 use crate::model::message::Message;
-use crate::ws::inference_worker::{generate_summary_message, InferenceJob, InferenceWorker};
+use crate::ws::inference_worker::{InferenceJob, InferenceWorker};
 use anyhow::anyhow;
 use uuid::Uuid;
 // ------------------------------------------------------------
@@ -182,27 +182,8 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                         if let Err(err) = state.db.save_message(&user_msg).await {
                             eprintln!("failed to save user message {}: {err}", user_msg.id);
                         }
-                        let has_summary =
-                            touch_chat(&state.db, &chat_id, Some(parsed.device_hash.clone()))
-                                .await
-                                .unwrap_or(true);
-
-                        // Kick off summary generation on first user request if missing
-                        if !has_summary {
-                            tokio::spawn({
-                                let db = state.db.clone();
-                                let infer = state.infer.clone();
-                                let chat_id = chat_id.clone();
-                                let ws_tx = tx.clone();
-                                async move {
-                                    if let Err(e) =
-                                        generate_summary_message(db, infer, chat_id, ws_tx).await
-                                    {
-                                        eprintln!("summary generation failed: {e}");
-                                    }
-                                }
-                            });
-                        }
+                        let _ =
+                            touch_chat(&state.db, &chat_id, Some(parsed.device_hash.clone())).await;
 
                         // Share cancel flag
                         let cancel_flag = {

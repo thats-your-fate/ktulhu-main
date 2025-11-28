@@ -27,6 +27,11 @@ pub struct InferenceWorker {
     tx: mpsc::Sender<InferenceJob>,
 }
 
+#[derive(serde::Deserialize, Debug)]
+struct SummaryJson {
+    summary: String,
+}
+
 impl InferenceWorker {
     pub fn new(queue_size: usize) -> Self {
         let (tx, rx) = mpsc::channel(queue_size);
@@ -98,6 +103,31 @@ async fn process_job(job: InferenceJob) {
     }
     let _ = touch_chat(&job.db, &assistant_msg.chat_id, None).await;
 
+    // Check if chat already has a summary
+    let has_summary = {
+        let history = job
+            .db
+            .list_messages_for_chat(&job.chat_id)
+            .await
+            .unwrap_or_default();
+        history.iter().any(|m| m.role == "summary")
+    };
+
+    // Queue summary generation once per chat
+    if !has_summary {
+        tokio::spawn({
+            let db = job.db.clone();
+            let infer = job.infer.clone();
+            let chat_id = job.chat_id.clone();
+            let ws_tx = job.sender.clone();
+            async move {
+                if let Err(e) = generate_summary_message(db, infer, chat_id, ws_tx).await {
+                    eprintln!("summary generation failed: {e}");
+                }
+            }
+        });
+    }
+
     let done_msg = serde_json::json!({
         "type": "assistant",
         "done": true
@@ -138,12 +168,40 @@ pub async fn generate_summary_message(
         return Ok(());
     }
 
-    let raw_summary = infer.generate(&prompt, 256).await?;
-    // Clean common end-of-sequence tokens or stray quotes.
-    let summary = raw_summary
-        .replace("</s>", "")
-        .trim_matches(|c: char| c.is_whitespace() || c == '"' || c == '\'')
-        .to_string();
+    let raw = infer.generate(&prompt, 128).await?;
+
+    // Attempt direct JSON parsing
+    let parsed: SummaryJson = match serde_json::from_str(&raw) {
+        Ok(v) => v,
+        Err(_) => {
+            // Try to extract the first JSON object inside the raw text
+            if let Some(start) = raw.find('{') {
+                if let Some(end) = raw.rfind('}') {
+                    let candidate = &raw[start..=end];
+
+                    match serde_json::from_str(candidate) {
+                        Ok(v) => v,
+                        Err(_) => {
+                            eprintln!("SUMMARY PARSE WARNING: fallback to raw text");
+                            SummaryJson {
+                                summary: raw.trim().to_string(),
+                            }
+                        }
+                    }
+                } else {
+                    SummaryJson {
+                        summary: raw.trim().to_string(),
+                    }
+                }
+            } else {
+                SummaryJson {
+                    summary: raw.trim().to_string(),
+                }
+            }
+        }
+    };
+
+    let summary = parsed.summary.trim().to_string();
 
     let msg = Message {
         id: Uuid::new_v4().to_string(),

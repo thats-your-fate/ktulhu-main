@@ -2,3 +2,7 @@ target
 Cargo.lock
 chatdb
 ministral_8b
+models
+storage
+.env
+ktulhuauth.json

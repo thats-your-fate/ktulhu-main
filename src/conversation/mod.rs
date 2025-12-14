@@ -46,24 +46,27 @@ pub fn build_ministral_prompt(history: &[Message], system_prompt: Option<&str>) 
     // Optional system prompt
     if let Some(sys) = system_prompt {
         out.push_str("<|im_start|>system\n");
-        out.push_str(sys);
+        out.push_str(&sanitize_chatml_text(sys));
         out.push_str("\n<|im_end|>\n");
     }
 
     for msg in history {
         let role = match msg.role.as_str() {
-            "assistant" => Role::Assistant,
-            "user" => Role::User,
-            "system" => Role::System,
-            _ => Role::User,
+            "assistant" => Some(Role::Assistant),
+            "user" => Some(Role::User),
+            "system" => Some(Role::System),
+            _ => None, // Skip non-chat roles (e.g. summary tags)
         };
 
-        let text = msg.text.clone().unwrap_or_default();
+        let (role, text) = match (role, msg.text.as_deref()) {
+            (Some(role), Some(text)) if !text.is_empty() => (role, text),
+            _ => continue,
+        };
 
         out.push_str("<|im_start|>");
         out.push_str(role.as_chatml());
         out.push_str("\n");
-        out.push_str(&text);
+        out.push_str(&sanitize_chatml_text(text));
         out.push_str("\n<|im_end|>\n");
     }
 
@@ -71,26 +74,6 @@ pub fn build_ministral_prompt(history: &[Message], system_prompt: Option<&str>) 
     out.push_str("<|im_start|>assistant\n");
 
     out
-}
-
-/// Build a compact prompt used for generating a short topic tag summary.
-pub fn build_summary_prompt(history: &[Message]) -> String {
-    // Base the summary solely on the initial user prompt to capture conversation intent.
-    let initial_user = history
-        .iter()
-        .find(|m| m.role == "user")
-        .and_then(|m| m.text.clone())
-        .unwrap_or_default();
-
-    format!(
-        "You are labeling conversations. Using ONLY the initial user request, produce 2–3 word topic tag that best describes what the message is about.
-         - Keep it specific and brief.
-         - Produce only the label itself, without extra explanation or symbols
-
-User request:
-{}",
-        initial_user
-    )
 }
 
 pub fn trim_history(mut history: Vec<Message>, max_messages: usize) -> Vec<Message> {
@@ -102,4 +85,44 @@ pub fn trim_history(mut history: Vec<Message>, max_messages: usize) -> Vec<Messa
     history.truncate(max_messages);
     history.reverse();
     history
+}
+
+fn sanitize_chatml_text(text: &str) -> String {
+    // Prevent user/system text from prematurely closing or opening ChatML blocks.
+    text.replace("<|im_start|>", "<|im\\_start|>")
+        .replace("<|im_end|>", "<|im\\_end|>")
+}
+
+/// Remove any ChatML control tokens from a generated string to avoid leaking them to users.
+pub fn strip_chatml_markers(text: &str) -> String {
+    // If the model starts emitting ChatML again, drop everything from the first marker onward.
+    let possible_markers = [
+        "<|im_start|>",
+        "<|im_end|>",
+        "<im_start|>",
+        "<im_end|>",
+        "<|im_start>",
+        "<|im_end>",
+        "<im_start>",
+        "<im_end>",
+        "<|im_",
+        "<im_",
+        "<|im",
+    ];
+
+    let cutoff = possible_markers
+        .iter()
+        .filter_map(|m| text.find(m))
+        .min()
+        .unwrap_or(text.len());
+
+    text[..cutoff]
+        .replace("<|im_start|>", "")
+        .replace("<|im_end|>", "")
+        .replace("<im_start|>", "")
+        .replace("<im_end|>", "")
+        .replace("<|im_start>", "")
+        .replace("<|im_end>", "")
+        .replace("<im_start>", "")
+        .replace("<im_end>", "")
 }

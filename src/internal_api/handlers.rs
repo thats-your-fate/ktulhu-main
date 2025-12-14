@@ -1,30 +1,14 @@
-use crate::{
-    internal_api::types::{InternalGenerateRequest, InternalGenerateResponse},
-    model::chat::Chat,
-    ws::AppState,
-};
-use axum::extract::{Json, Path, State};
+use crate::{model::chat::Chat, model::message::Message, ws::AppState};
+
+use axum::{extract::Path, extract::State, Json};
 use serde_json::json;
 use std::cmp::Reverse;
 use uuid::Uuid;
 
-pub async fn internal_generate(
-    State(state): State<AppState>,
-    Json(req): Json<InternalGenerateRequest>,
-) -> Json<InternalGenerateResponse> {
-    let max = if req.max_tokens == 0 {
-        128
-    } else {
-        req.max_tokens
-    };
-
-    let out = state
-        .infer
-        .generate(&req.prompt, max)
-        .await
-        .unwrap_or_else(|_| "Internal error".into());
-
-    Json(InternalGenerateResponse { output: out })
+#[derive(Debug, serde::Serialize)]
+pub struct MessagesResponse {
+    pub chat_id: String,
+    pub messages: Vec<Message>,
 }
 
 pub async fn get_thread(
@@ -123,6 +107,24 @@ pub async fn list_messages_by_device(
     }
 }
 
+pub async fn list_messages_for_chat(
+    State(state): State<AppState>,
+    Path(chat_id): Path<String>,
+) -> Json<MessagesResponse> {
+    let mut msgs = state
+        .db
+        .list_messages_for_chat(&chat_id)
+        .await
+        .unwrap_or_default();
+
+    msgs.sort_by_key(|m| m.ts);
+
+    Json(MessagesResponse {
+        chat_id,
+        messages: msgs,
+    })
+}
+
 /// Ensure a chat exists for the given id/device; create one if missing.
 pub async fn ensure_chat_for_device(
     db: &crate::db::DBLayer,
@@ -149,4 +151,22 @@ pub async fn ensure_chat_for_device(
     };
     db.save_chat(&chat).await?;
     Ok(new_id)
+}
+
+pub async fn list_chats_by_user(
+    State(state): State<AppState>,
+    Path(user_id): Path<String>,
+) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    // Collect all chats (explicit + devices)
+    let chats = state
+        .db
+        .list_chats_for_user(&user_id)
+        .await
+        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(serde_json::json!({
+        "user_id": user_id,
+        "count": chats.len(),
+        "chats": chats
+    })))
 }

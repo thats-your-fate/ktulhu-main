@@ -2,7 +2,8 @@ use anyhow::Result;
 use rocksdb::{Direction, IteratorMode, Options, DB};
 use serde_json;
 
-use crate::model::{chat::Chat, message::Message, user::User};
+use crate::model::{chat::Chat, message::Message, user::User, user_device::UserDevice};
+
 use std::str;
 
 pub struct DBLayer {
@@ -23,6 +24,14 @@ impl DBLayer {
     fn msg_key(chat_id: &str, ts: i64, id: &str) -> String {
         format!("chat:{}:msg:{:020}:{id}", chat_id, ts)
         // 020 → zero-padded timestamp for correct sorting
+    }
+
+    fn user_device_key(user_id: &str, device_id: &str) -> String {
+        format!("user_device:{user_id}:{device_id}")
+    }
+
+    fn device_lookup_key(device_hash: &str) -> String {
+        format!("device_lookup:{device_hash}")
     }
 
     pub async fn save_message(&self, msg: &Message) -> Result<()> {
@@ -121,13 +130,20 @@ impl DBLayer {
         Ok(results)
     }
 
+    /// List all chats belonging to all devices of a user.
     pub async fn list_chats_for_user(&self, user_id: &str) -> Result<Vec<Chat>> {
-        Ok(self
-            .list_chats()
-            .await?
-            .into_iter()
-            .filter(|c| c.user_id.as_deref() == Some(user_id))
-            .collect())
+        let mut all_chats = Vec::new();
+
+        // 1. Load all devices for user
+        let devices = self.list_devices_for_user(user_id).await?;
+
+        // 2. For each device, load its chats
+        for device in devices {
+            let mut chats = self.list_chats_for_device(&device.device_hash).await?;
+            all_chats.append(&mut chats);
+        }
+
+        Ok(all_chats)
     }
 
     pub async fn list_chats_for_device(&self, device_hash: &str) -> Result<Vec<Chat>> {
@@ -206,5 +222,106 @@ impl DBLayer {
         }
 
         Ok(results)
+    }
+
+    pub async fn save_user_device(&self, device: &UserDevice) -> Result<()> {
+        let key = Self::user_device_key(&device.user_id, &device.id);
+        let val = serde_json::to_vec(device)?;
+
+        self.db.put(key, val)?;
+
+        // reverse lookup for authentication by device
+        let lookup_key = Self::device_lookup_key(&device.device_hash);
+        self.db.put(lookup_key, device.id.as_bytes())?;
+
+        Ok(())
+    }
+
+    pub async fn load_user_device(
+        &self,
+        user_id: &str,
+        device_id: &str,
+    ) -> Result<Option<UserDevice>> {
+        let key = Self::user_device_key(user_id, device_id);
+        Ok(self
+            .db
+            .get(key)?
+            .map(|v| serde_json::from_slice(&v).unwrap()))
+    }
+
+    pub async fn find_device_by_hash(&self, device_hash: &str) -> Result<Option<UserDevice>> {
+        let lookup_key = Self::device_lookup_key(device_hash);
+
+        let Some(device_id_bytes) = self.db.get(lookup_key)? else {
+            return Ok(None);
+        };
+
+        let device_id = String::from_utf8(device_id_bytes.to_vec())?;
+
+        // Now we must find the corresponding user
+        // → search all user_device:{user_id}:{device_id}
+        let prefix = "user_device:";
+        for item in self
+            .db
+            .iterator(IteratorMode::From(prefix.as_bytes(), Direction::Forward))
+        {
+            let (key, val) = item?;
+            let k = std::str::from_utf8(&key)?;
+
+            if !k.contains(&device_id) {
+                continue;
+            }
+
+            let dev: UserDevice = serde_json::from_slice(&val)?;
+            if dev.device_hash == device_hash {
+                return Ok(Some(dev));
+            }
+        }
+
+        Ok(None)
+    }
+
+    pub async fn list_devices_for_user(&self, user_id: &str) -> Result<Vec<UserDevice>> {
+        let prefix = format!("user_device:{user_id}:");
+        let mut out = Vec::new();
+
+        for item in self.db.iterator(IteratorMode::From(
+            prefix.as_bytes(),
+            rocksdb::Direction::Forward,
+        )) {
+            let (key, val) = item?;
+            let k = std::str::from_utf8(&key)?;
+            if !k.starts_with(&prefix) {
+                break;
+            }
+            out.push(serde_json::from_slice(&val)?);
+        }
+        Ok(out)
+    }
+
+    pub async fn add_device_for_user(&self, user_id: &str, device_hash: &str) -> Result<()> {
+        let dev = UserDevice {
+            id: uuid::Uuid::new_v4().to_string(),
+            user_id: user_id.to_string(),
+            device_hash: device_hash.to_string(),
+            created_ts: chrono::Utc::now().timestamp(),
+            last_seen_ts: chrono::Utc::now().timestamp(),
+            meta: None,
+        };
+
+        let key = Self::user_device_key(user_id, &dev.id);
+        let val = serde_json::to_vec(&dev)?;
+        self.db.put(key, val)?;
+
+        // fast lookup: device → user
+        let lookup_key = Self::device_lookup_key(device_hash);
+        self.db.put(lookup_key, user_id)?;
+
+        Ok(())
+    }
+
+    pub async fn user_id_by_device(&self, device_hash: &str) -> Result<Option<String>> {
+        let key = Self::device_lookup_key(device_hash);
+        Ok(self.db.get(key)?.map(|v| String::from_utf8(v).unwrap()))
     }
 }

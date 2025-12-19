@@ -1,32 +1,83 @@
+use once_cell::sync::Lazy;
+use serde::Deserialize;
+use std::collections::HashMap;
+
+
+// NOTE:
+// Intent prompts are language-localized to improve
+// tone, clarity, and reasoning alignment.
+// Core reasoning logic remains language-agnostic.
+
 pub const INTENT_LABELS: &[&str] = &[
     "chat_casual",
     "task_short",
     "advice_practical",
     "opinion_reflective",
+    "opinion_casual",
     "culture_context",
+    "reasoning_logical",
 ];
 
 const DEFAULT_INTENT: &str = "chat_casual";
+
+#[derive(Deserialize)]
+struct PromptFile {
+    default: String,
+    prompts: HashMap<String, String>,
+}
+
+struct LanguagePromptSet {
+    default_prompt: String,
+    prompts: HashMap<String, String>,
+}
+
+macro_rules! prompt_file {
+    ($lang:literal) => {
+        include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/lang/",
+            $lang,
+            "/prompts.json"
+        ))
+    };
+}
+
+static EN_PROMPTS: Lazy<LanguagePromptSet> = Lazy::new(|| load_prompt_set(prompt_file!("en")));
+static ES_PROMPTS: Lazy<LanguagePromptSet> = Lazy::new(|| load_prompt_set(prompt_file!("es")));
+static RU_PROMPTS: Lazy<LanguagePromptSet> = Lazy::new(|| load_prompt_set(prompt_file!("ru")));
+static PT_PROMPTS: Lazy<LanguagePromptSet> = Lazy::new(|| load_prompt_set(prompt_file!("pt")));
+
+fn load_prompt_set(raw: &str) -> LanguagePromptSet {
+    let parsed: PromptFile = serde_json::from_str(raw).expect("invalid prompt config");
+    LanguagePromptSet {
+        default_prompt: parsed.default,
+        prompts: parsed.prompts,
+    }
+}
+
+fn language_prompts(language: Option<&str>) -> &'static LanguagePromptSet {
+    let normalized = language
+        .and_then(|lang| lang.split(|c| c == '-' || c == '_').next())
+        .unwrap_or("en")
+        .to_ascii_lowercase();
+
+    match normalized.as_str() {
+        "es" => &ES_PROMPTS,
+        "ru" => &RU_PROMPTS,
+        "pt" => &PT_PROMPTS,
+        _ => &EN_PROMPTS,
+    }
+}
 
 pub fn default_intent() -> &'static str {
     DEFAULT_INTENT
 }
 
-pub fn prompt_for_intent(intent: &str) -> &'static str {
-    match intent {
-        "chat_casual" => CHAT_CASUAL_PROMPT,
-        "task_short" => TASK_SHORT_PROMPT,
-        "advice_practical" => ADVICE_PRACTICAL_PROMPT,
-        "opinion_reflective" => OPINION_REFLECTIVE_PROMPT,
-        "culture_context" => CULTURE_CONTEXT_PROMPT,
-        _ => DEFAULT_PROMPT,
-    }
+pub fn prompt_for_intent(intent: &str, language: Option<&str>) -> String {
+    let set = language_prompts(language);
+    set.prompts
+        .get(intent)
+        .cloned()
+        .or_else(|| set.prompts.get(DEFAULT_INTENT).cloned())
+        .unwrap_or_else(|| set.default_prompt.clone())
 }
-
-const DEFAULT_PROMPT: &str =
-    "You are a helpful, clear, and polite assistant. Answer concisely and do not combine unrelated topics.";
-const CHAT_CASUAL_PROMPT: &str = "You are an empathetic, upbeat companion. Respond with warmth and short friendly messages. Do NOT analyze situations deeply, list pros and cons, give structured advice, or provide tips unless the user explicitly asks.";
-const TASK_SHORT_PROMPT: &str = "You are an efficient task assistant. Provide only the minimal steps or data required. Do NOT include chit-chat, optional context, long explanations, greetings, closings, or explanations unless explicitly requested.";
-const ADVICE_PRACTICAL_PROMPT: &str = "You offer grounded, actionable advice. Give clear steps or bullet points and highlight trade-offs. Do NOT ask follow-up questions unless absolutely necessary. Prefer 4–6 concise steps over exhaustive lists.";
-const OPINION_REFLECTIVE_PROMPT: &str = "You are a balanced analyst. Present both sides thoughtfully and acknowledge uncertainty. Do NOT end the response with a question.";
-const CULTURE_CONTEXT_PROMPT: &str = "You are culturally sensitive. Use inclusive language, avoid absolutes, and note when viewpoints vary across regions or communities. Do NOT present a single culture or region as definitive, and avoid travel safety tips unless the user asks.";

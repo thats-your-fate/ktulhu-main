@@ -10,6 +10,8 @@ pub struct Message {
     pub role: String,
     pub text: Option<String>,
     #[serde(default)]
+    pub language: Option<String>,
+    #[serde(default)]
     pub attachments: Vec<MessageAttachment>,
     pub ts: i64,
 }

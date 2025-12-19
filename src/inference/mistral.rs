@@ -88,6 +88,21 @@ impl MistralService {
 
         rx
     }
+
+    pub async fn generate_completion(
+        &self,
+        prompt: String,
+        cancel: Arc<AtomicBool>,
+    ) -> Result<String> {
+        run_mistral_completion(
+            self.model.clone(),
+            self.tokenizer.clone(),
+            self.device.clone(),
+            prompt,
+            cancel,
+        )
+        .await
+    }
 }
 
 // ---------------------------------------------------------
@@ -173,6 +188,84 @@ pub async fn run_mistral_stream(
     }
 
     Ok(())
+}
+
+async fn run_mistral_completion(
+    model: Arc<Mutex<Mistral>>,
+    tokenizer: Arc<Tokenizer>,
+    device: Device,
+    user_prompt: String,
+    cancel: Arc<AtomicBool>,
+) -> Result<String> {
+    {
+        let mut m = model.lock().await;
+        m.clear_kv_cache();
+    }
+
+    use tokenizers::EncodeInput;
+    let enc = tokenizer
+        .encode(EncodeInput::Single(user_prompt.into()), true)
+        .map_err(|e| anyhow!("Tokenizer encode error: {e}"))?;
+    let mut tokens = enc.get_ids().to_vec();
+
+    let eos = tokenizer
+        .token_to_id("<eos>")
+        .or_else(|| tokenizer.token_to_id("</s>"))
+        .unwrap_or(u32::MAX);
+
+    let mut pos = 0usize;
+    let mut lp = LogitsProcessor::new(seed(), Some(0.7), None);
+    let mut output = String::new();
+
+    const MAX_NEW_TOKENS: usize = 4096;
+
+    for _ in 0..MAX_NEW_TOKENS {
+        if cancel.load(Ordering::SeqCst) {
+            return Err(anyhow!("cancelled"));
+        }
+
+        let ctx: &[u32] = if pos == 0 {
+            &tokens
+        } else {
+            std::slice::from_ref(tokens.last().unwrap())
+        };
+
+        let input = Tensor::new(ctx, &device)?.unsqueeze(0)?;
+
+        let logits = {
+            let mut m = model.lock().await;
+            let out = m.forward(&input, pos)?;
+            let seq_len = out.dim(1)?;
+            out.i((0, seq_len - 1))?.to_dtype(DType::F32)?
+        };
+
+        pos += ctx.len();
+
+        let next_id = lp.sample(&logits)?;
+        tokens.push(next_id);
+
+        if next_id == eos {
+            break;
+        }
+
+        let mut piece = match tokenizer.decode(&[next_id], false) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+
+        if piece.contains('\u{2581}') {
+            piece = piece.replace('\u{2581}', " ");
+        }
+        if piece.is_empty() || piece == "\u{200b}" {
+            continue;
+        }
+
+        output.push_str(&piece);
+
+        tokio::task::yield_now().await;
+    }
+
+    Ok(output)
 }
 
 // ---------------------------------------------------------

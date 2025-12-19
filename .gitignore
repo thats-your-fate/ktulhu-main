@@ -4,5 +4,6 @@ chatdb
 ministral_8b
 models
 storage
+!src/storage
 .env
 ktulhuauth.json

@@ -16,6 +16,7 @@ mod internal_api;
 mod manager;
 mod model;
 mod prompts;
+mod reasoning;
 mod storage;
 mod ws;
 

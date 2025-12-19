@@ -6,13 +6,13 @@ use std::{fs, path::PathBuf, sync::Arc};
 use tokio::sync::Mutex;
 
 use candle_transformers::models::bert::{BertModel, Config as BertConfig};
+use tokenizers::pre_tokenizers::byte_level::ByteLevel;
 use tokenizers::{
     models::bpe::BPE,
     normalizers::{unicode::NFC, NormalizerWrapper},
-    pre_tokenizers::{whitespace::Whitespace, PreTokenizerWrapper},
+    pre_tokenizers::PreTokenizerWrapper,
     Tokenizer,
 };
-use tokenizers::pre_tokenizers::byte_level::ByteLevel;
 pub struct RobertaService {
     pub model: Arc<Mutex<BertModel>>,
     pub tokenizer: Arc<Tokenizer>,
@@ -48,8 +48,8 @@ impl RobertaService {
         tokenizer.with_normalizer(Some(NormalizerWrapper::NFC(NFC)));
 
         // Pre-tokenizer: must be wrapped in Option<PreTokenizerWrapper>
-       // tokenizer.with_pre_tokenizer(Some(PreTokenizerWrapper::Whitespace(Whitespace::default())));
-tokenizer.with_pre_tokenizer(Some(PreTokenizerWrapper::ByteLevel(ByteLevel::default())));
+        // tokenizer.with_pre_tokenizer(Some(PreTokenizerWrapper::Whitespace(Whitespace::default())));
+        tokenizer.with_pre_tokenizer(Some(PreTokenizerWrapper::ByteLevel(ByteLevel::default())));
         let tokenizer = Arc::new(tokenizer);
 
         // Config

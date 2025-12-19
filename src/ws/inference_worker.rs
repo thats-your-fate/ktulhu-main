@@ -3,10 +3,10 @@ use serde_json::json;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::mpsc;
-use tracing::debug;
+use tracing::{debug, info};
 use uuid::Uuid;
 
-use crate::conversation::strip_chatml_markers;
+use crate::conversation::{strip_chatml_markers, trim_partial_chatml};
 use crate::db::DBLayer;
 use crate::inference::InferenceService;
 use crate::model::message::Message;
@@ -38,6 +38,14 @@ impl InferenceWorker {
         let (tx, rx) = mpsc::channel(queue_size);
         tokio::spawn(worker_loop(rx));
         Self { tx }
+    }
+
+    pub fn try_enqueue(&self, job: InferenceJob) -> bool {
+        match self.tx.try_send(job) {
+            Ok(()) => true,
+            Err(mpsc::error::TrySendError::Full(_)) => false,
+            Err(mpsc::error::TrySendError::Closed(_)) => false,
+        }
     }
 
     pub async fn enqueue(
@@ -94,9 +102,22 @@ async fn process_job(job: InferenceJob) {
         return;
     }
 
+    if job.sender.is_closed() {
+        return;
+    }
+
     let is_warmup = job.chat_id == "__warmup__";
 
-    let mut stream = job.infer.generate_stream(job.prompt, job.cancel.clone());
+    info!(
+        chat_id = job.chat_id.as_str(),
+        session_id = job.session_id.as_str(),
+        stop_sequences = "<|im_end|>",
+        "starting mistral stream"
+    );
+
+    let mut stream = job
+        .infer
+        .generate_stream(job.prompt.clone(), job.cancel.clone());
 
     let mut raw_reply = String::new();
     let mut assistant_reply = String::new();
@@ -113,16 +134,22 @@ async fn process_job(job: InferenceJob) {
 
         // Strip ChatML markers so they never reach the websocket/UI.
         let cleaned = strip_chatml_markers(&raw_reply);
+        let trimmed = trim_partial_chatml(&cleaned);
 
         // Only send the delta beyond what we've already emitted.
-        if cleaned.len() <= assistant_reply.len() {
+        if trimmed.len() <= assistant_reply.len() {
             if saw_chatml_marker {
+                info!(
+                    chat_id = job.chat_id.as_str(),
+                    session_id = job.session_id.as_str(),
+                    "stop sequence detected (no delta)"
+                );
                 break;
             }
             continue;
         }
 
-        let delta = &cleaned[assistant_reply.len()..];
+        let delta = &trimmed[assistant_reply.len()..];
         assistant_reply.push_str(delta);
 
         let msg = serde_json::json!({
@@ -131,6 +158,10 @@ async fn process_job(job: InferenceJob) {
         });
 
         if job.cancel.load(Ordering::SeqCst) {
+            break;
+        }
+
+        if job.sender.is_closed() {
             break;
         }
 
@@ -145,6 +176,11 @@ async fn process_job(job: InferenceJob) {
 
         // Stop generating if the model started another ChatML block.
         if saw_chatml_marker {
+            info!(
+                chat_id = job.chat_id.as_str(),
+                session_id = job.session_id.as_str(),
+                "stop sequence detected in stream"
+            );
             break;
         }
     }
@@ -153,6 +189,8 @@ async fn process_job(job: InferenceJob) {
         return;
     }
 
+    let final_response = trim_partial_chatml(&assistant_reply).to_string();
+
     let assistant_msg = Message {
         id: Uuid::new_v4().to_string(),
         chat_id: job.chat_id.clone(),
@@ -160,7 +198,8 @@ async fn process_job(job: InferenceJob) {
         user_id: None,
         device_hash: None,
         role: "assistant".into(),
-        text: Some(assistant_reply.clone()),
+        text: Some(final_response.clone()),
+        language: None,
         attachments: Vec::new(),
         ts: chrono::Utc::now().timestamp(),
     };
@@ -208,10 +247,14 @@ async fn process_job(job: InferenceJob) {
         "done": true
     });
 
-    let _ = job
+    if job
         .sender
         .send(WsMessage::Text(done_msg.to_string().into()))
-        .await;
+        .await
+        .is_err()
+    {
+        return;
+    }
 }
 
 pub async fn generate_summary_message(
@@ -268,6 +311,7 @@ JSON:"#,
         device_hash: None,
         role: "summary".into(),
         text: Some(summary.clone()),
+        language: None,
         attachments: Vec::new(),
         ts: chrono::Utc::now().timestamp(),
     };

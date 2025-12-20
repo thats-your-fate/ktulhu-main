@@ -8,6 +8,7 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilte
 use dotenvy::dotenv;
 
 mod auth;
+mod attachments;
 mod classifier;
 mod conversation;
 mod db;

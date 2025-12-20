@@ -1,6 +1,8 @@
 use crate::model::message::Message;
 use serde::{Deserialize, Serialize};
 
+pub const STOP_SEQS: &[&str] = &["<|", "<|im_end|>"];
+
 /// Role for chat messages
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Role {

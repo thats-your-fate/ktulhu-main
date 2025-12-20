@@ -9,6 +9,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::{fs, path::PathBuf, sync::Arc};
 use tokio::sync::{mpsc, Mutex};
 
+use crate::conversation::STOP_SEQS;
+
 // ---------------------------------------------------------
 // PUBLIC SERVICE
 // ---------------------------------------------------------
@@ -261,6 +263,10 @@ async fn run_mistral_completion(
         }
 
         output.push_str(&piece);
+
+        if STOP_SEQS.iter().any(|seq| output.contains(seq)) {
+            break;
+        }
 
         tokio::task::yield_now().await;
     }

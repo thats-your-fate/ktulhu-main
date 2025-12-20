@@ -5,7 +5,7 @@ pub enum ReasoningMode {
     DecomposeThenAnswer,
 }
 
-use crate::reasoning::ReasoningProfile;
+use crate::classifier::routing::ReasoningProfile;
 
 pub fn select_reasoning_mode(
     detected_profile: ReasoningProfile,

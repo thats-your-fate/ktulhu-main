@@ -1,11 +1,9 @@
-use super::{
-    profile::ReasoningProfile,
-    prompts::{
-        analysis_system_prompt, decomposition_system_prompt, final_response_rules,
-        response_behavior_constraints_light, response_behavior_constraints_strict,
-        validation_system_prompt,
-    },
+use super::prompts::{
+    analysis_system_prompt, decomposition_system_prompt, final_response_rules,
+    response_behavior_constraints_light, response_behavior_constraints_strict,
+    validation_system_prompt,
 };
+use crate::classifier::routing::ReasoningProfile;
 use crate::conversation::sanitize_chatml_text;
 
 fn build_hidden_chatml_prompt(system_text: &str, user_text: &str) -> String {

@@ -1,7 +1,8 @@
 mod executor;
 mod planner;
-mod profile;
 mod prompts;
+
+pub use crate::classifier::routing::{profile_from_intent, select_reasoning_profile, ReasoningProfile};
 
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -16,7 +17,6 @@ use planner::{
     analysis_hidden_instruction, build_analysis_prompt, build_decomposition_prompt,
     build_validation_prompt, decomposition_hidden_instruction,
 };
-pub use profile::{select_reasoning_profile, ReasoningProfile};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReasoningStage {

@@ -9,6 +9,7 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
 use tokio::time::{timeout, Duration, Instant};
 
+use crate::attachments::{attachment_summaries, IncomingAttachment};
 use crate::classifier::reasoning_policy::{select_reasoning_mode, ReasoningMode};
 
 const REASONING_BACKOFF_SECS: u64 = 120;
@@ -17,7 +18,7 @@ use crate::db::DBLayer;
 use crate::inference::InferenceService;
 use crate::manager::ModelManager;
 use crate::model::chat::Chat;
-use crate::model::message::{Message, MessageAttachment};
+use crate::model::message::Message;
 use crate::reasoning::{run_reasoning, ReasoningProfile, ReasoningResult};
 use crate::storage::StorageService;
 use crate::ws::inference_worker::{InferenceJob, InferenceWorker};
@@ -59,18 +60,6 @@ pub enum MsgType {
     Prompt,
     Register,
     Cancel,
-}
-
-#[derive(Deserialize, Debug, Clone)]
-pub struct IncomingAttachment {
-    pub id: String,
-    pub filename: String,
-    #[serde(default)]
-    pub mime_type: Option<String>,
-    pub path: String,
-    pub size: usize,
-    #[serde(default)]
-    pub description: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -162,16 +151,38 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                         // -----------------------------------------------------
                         // 1) CLASSIFICATION — this is the only added section
                         // -----------------------------------------------------
+                        let attachment_notes = attachment_summaries(&parsed.attachments);
+                        let mut enriched_text = parsed.text.clone();
+                        let attachment_summary_combined = if attachment_notes.is_empty() {
+                            None
+                        } else {
+                            enriched_text.push_str("\n\n[Attachments]\n");
+                            for note in &attachment_notes {
+                                enriched_text.push_str("- ");
+                                enriched_text.push_str(note);
+                                enriched_text.push('\n');
+                            }
+                            let combined = attachment_notes.join("\n");
+                            info!(
+                                chat_id = parsed.chat_id.as_str(),
+                                request_id = parsed.request_id.as_str(),
+                                attachments = attachment_notes.len(),
+                                summary = combined.as_str(),
+                                "attachment summary generated"
+                            );
+                            Some(combined)
+                        };
+
                         let scope = crate::classifier::scope::classify_scope(
                             &state.models,
-                            parsed.text.as_str(),
+                            enriched_text.as_str(),
                         )
                         .await
                         .unwrap_or_else(|_| "unknown".into());
 
                         let routing_result = match crate::classifier::routing::route_intent(
                             &state.models,
-                            parsed.text.as_str(),
+                            enriched_text.as_str(),
                             parsed.language.as_deref(),
                         )
                         .await
@@ -196,22 +207,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
 
                         let routing_language = routing_result.language.clone();
 
-                        if routing_result.multi_intent {
-                            if let Err(err) = send_json(
-                                &tx,
-                                serde_json::json!({
-                                    "type": "system",
-                                    "event": "multi_intent_blocked",
-                                    "message": "Please ask one question at a time so I can answer accurately."
-                                }),
-                            )
-                            .await
-                            {
-                                eprintln!("failed to send ws message: {err}");
-                                break 'socket_loop;
-                            }
-                            continue;
-                        }
+
 
                         for note in &routing_result.notes {
                             info!(
@@ -220,22 +216,6 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                 note = note.as_str(),
                                 "intent routing note"
                             );
-                        }
-
-                        if routing_result.clarification_needed {
-                            if let Err(err) = send_json(
-                                &tx,
-                                serde_json::json!({
-                                    "type": "system",
-                                    "event": "intent_clarification_needed",
-                                    "message": "Just to confirm—are you looking for advice, a short task response, or general thoughts?"
-                                }),
-                            )
-                            .await
-                            {
-                                eprintln!("failed to send ws message: {err}");
-                                break 'socket_loop;
-                            }
                         }
 
                         let reasoning_profile = routing_result
@@ -265,14 +245,6 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                             break 'socket_loop;
                         }
 
-                        // -----------------------------------------------------
-                        // 2) HANDLE NON-MODEL CASES (stop here)
-
-                        // -----------------------------------------------------
-
-                        // -----------------------------------------------------
-                        // 3) NORMAL CHAT FLOW (no_rag) — original logic resumes
-                        // -----------------------------------------------------
 
                         // Ensure chat exists (create if missing)
                         let chat_id = match ensure_chat_for_device(
@@ -311,43 +283,22 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                             }
                         }
 
-                        // Persist attachments (if any)
-                        let attachments = match persist_attachments(&parsed.attachments) {
-                            Ok(files) => files,
-                            Err(e) => {
-                                eprintln!("failed to store attachments: {e}");
-                                if let Err(err) =
-                                    send_json(&tx, json_error("attachment_error")).await
-                                {
-                                    eprintln!("failed to send ws message: {err}");
-                                    break 'socket_loop;
-                                }
-                                continue;
-                            }
-                        };
+                        let mut user_text = enriched_text.clone();
 
-                        let mut user_text = parsed.text.clone();
-
-                        if !parsed.attachments.is_empty() {
-                            if let Some(summary) =
-                                compose_attachment_descriptions(&parsed.attachments)
+                        if let Some(combined) = attachment_summary_combined.clone() {
+                            debug!("attachment descriptions provided: {}", combined);
+                            if let Err(err) = send_json(
+                                &tx,
+                                serde_json::json!({
+                                    "type": "vision_summary",
+                                    "chat_id": chat_id,
+                                    "summary": combined
+                                }),
+                            )
+                            .await
                             {
-                                user_text.push_str("\n\n[Vision attachments]\n");
-                                user_text.push_str(&summary);
-                                debug!("attachment descriptions provided: {}", summary);
-                                if let Err(err) = send_json(
-                                    &tx,
-                                    serde_json::json!({
-                                        "type": "vision_summary",
-                                        "chat_id": chat_id,
-                                        "summary": summary
-                                    }),
-                                )
-                                .await
-                                {
-                                    eprintln!("failed to send ws message: {err}");
-                                    break 'socket_loop;
-                                }
+                                eprintln!("failed to send ws message: {err}");
+                                break 'socket_loop;
                             }
                         }
 
@@ -374,7 +325,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                             role: "user".into(),
                             text: Some(user_text.clone()),
                             language: Some(routing_language.clone()),
-                            attachments: attachments.clone(),
+                            attachments: Vec::new(),
                             ts: chrono::Utc::now().timestamp(),
                         };
 
@@ -608,53 +559,6 @@ async fn handle_register(
     .await?;
 
     Ok(())
-}
-
-fn persist_attachments(incoming: &[IncomingAttachment]) -> Result<Vec<MessageAttachment>, String> {
-    let mut files = Vec::new();
-
-    for item in incoming {
-        if item.id.trim().is_empty()
-            || item.filename.trim().is_empty()
-            || item.path.trim().is_empty()
-        {
-            return Err("attachment reference is missing id/filename/path".to_string());
-        }
-
-        files.push(MessageAttachment {
-            id: item.id.clone(),
-            filename: item.filename.clone(),
-            mime_type: item.mime_type.clone(),
-            path: item.path.clone(),
-            size: item.size,
-        });
-    }
-
-    Ok(files)
-}
-
-fn compose_attachment_descriptions(attachments: &[IncomingAttachment]) -> Option<String> {
-    let mut lines = Vec::new();
-
-    for item in attachments {
-        if let Some(desc) = item.description.as_deref() {
-            if !desc.trim().is_empty() {
-                lines.push(format!("{}: {}", item.filename, desc.trim()));
-                continue;
-            }
-        }
-        if let Some(mime) = &item.mime_type {
-            lines.push(format!("{} ({} bytes, {})", item.filename, item.size, mime));
-        } else {
-            lines.push(format!("{} ({} bytes)", item.filename, item.size));
-        }
-    }
-
-    if lines.is_empty() {
-        None
-    } else {
-        Some(lines.join("\n"))
-    }
 }
 
 // ------------------------------------------------------------

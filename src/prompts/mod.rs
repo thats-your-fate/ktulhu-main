@@ -2,7 +2,6 @@ use once_cell::sync::Lazy;
 use serde::Deserialize;
 use std::collections::HashMap;
 
-
 // NOTE:
 // Intent prompts are language-localized to improve
 // tone, clarity, and reasoning alignment.

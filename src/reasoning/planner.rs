@@ -27,11 +27,7 @@ pub fn build_analysis_prompt(
     build_hidden_chatml_prompt(template, user_text)
 }
 
-pub fn build_validation_prompt(
-    user_text: &str,
-    analysis: &str,
-    language: Option<&str>,
-) -> String {
+pub fn build_validation_prompt(user_text: &str, analysis: &str, language: Option<&str>) -> String {
     let user_section = format!(
         "USER:\n{}\n\nANALYSIS:\n{}",
         user_text.trim(),

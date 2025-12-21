@@ -7,8 +7,8 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilte
 
 use dotenvy::dotenv;
 
-mod auth;
 mod attachments;
+mod auth;
 mod classifier;
 mod conversation;
 mod db;
@@ -18,12 +18,10 @@ mod manager;
 mod model;
 mod prompts;
 mod reasoning;
-mod storage;
 mod ws;
 
 use db::DBLayer;
 use manager::ModelManager;
-use storage::StorageService;
 use ws::{inference_worker::warmup_job, AppState, InferenceWorker};
 
 #[tokio::main]
@@ -60,11 +58,6 @@ async fn main() -> anyhow::Result<()> {
         println!("⚠️  APPLE_CLIENT_ID not set — Apple Login disabled");
         String::new()
     });
-
-    // -----------------------------------
-    // Local storage for uploads
-    // -----------------------------------
-    let storage = Arc::new(StorageService::new("storage").await?);
 
     // -----------------------------------
     // Shared DB
@@ -118,7 +111,6 @@ async fn main() -> anyhow::Result<()> {
         jwt_secret,
         google_client_id,
         apple_client_id,
-        storage,
     };
 
     // -----------------------------------

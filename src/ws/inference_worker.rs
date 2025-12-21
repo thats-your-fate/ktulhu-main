@@ -119,42 +119,42 @@ async fn process_job(job: InferenceJob) {
         .infer
         .generate_stream(job.prompt.clone(), job.cancel.clone());
 
-    let mut raw_reply = String::new();
     let mut assistant_reply = String::new();
+    let mut tail = String::new();
 
     while let Some(token) = stream.recv().await {
         if is_warmup {
             break; // first token is enough
         }
 
-        raw_reply.push_str(&token);
-
-        let saw_chatml_marker =
-            raw_reply.contains("<|im") || raw_reply.contains("<im_") || raw_reply.contains("<|im_");
-
-        // Strip ChatML markers so they never reach the websocket/UI.
-        let cleaned = strip_chatml_markers(&raw_reply);
-        let trimmed = trim_partial_chatml(&cleaned);
-
-        // Only send the delta beyond what we've already emitted.
-        if trimmed.len() <= assistant_reply.len() {
-            if saw_chatml_marker {
-                info!(
-                    chat_id = job.chat_id.as_str(),
-                    session_id = job.session_id.as_str(),
-                    "stop sequence detected (no delta)"
-                );
-                break;
-            }
-            continue;
+        tail.push_str(&token);
+        if tail.len() > 64 {
+            tail = tail[tail.len() - 64..].to_string();
         }
 
-        let delta = &trimmed[assistant_reply.len()..];
-        assistant_reply.push_str(delta);
+        if tail.contains("<|im_end|>") || tail.contains("<|im_start|>") {
+            info!(
+                chat_id = job.chat_id.as_str(),
+                session_id = job.session_id.as_str(),
+                "stop sequence detected in stream"
+            );
+            break;
+        }
+
+        if token.contains('\u{FFFD}') {
+            tracing::error!(
+                chat_id = job.chat_id.as_str(),
+                session_id = job.session_id.as_str(),
+                bytes = ?token.as_bytes(),
+                "TOKEN CONTAINS U+FFFD BEFORE CLEANUP"
+            );
+        }
+
+        assistant_reply.push_str(&token);
 
         let msg = serde_json::json!({
             "type": "assistant",
-            "token": delta
+            "token": token
         });
 
         if job.cancel.load(Ordering::SeqCst) {
@@ -174,22 +174,14 @@ async fn process_job(job: InferenceJob) {
             break;
         }
 
-        // Stop generating if the model started another ChatML block.
-        if saw_chatml_marker {
-            info!(
-                chat_id = job.chat_id.as_str(),
-                session_id = job.session_id.as_str(),
-                "stop sequence detected in stream"
-            );
-            break;
-        }
+        tail.clear();
     }
 
     if is_warmup {
         return;
     }
 
-    let final_response = trim_partial_chatml(&assistant_reply).to_string();
+    let final_response = trim_partial_chatml(&strip_chatml_markers(&assistant_reply)).to_string();
 
     let assistant_msg = Message {
         id: Uuid::new_v4().to_string(),
@@ -201,6 +193,7 @@ async fn process_job(job: InferenceJob) {
         text: Some(final_response.clone()),
         language: None,
         attachments: Vec::new(),
+        liked: false,
         ts: chrono::Utc::now().timestamp(),
     };
 
@@ -273,10 +266,11 @@ pub async fn generate_summary_message(
         return Ok(());
     }
 
+    let user_messages: Vec<&Message> = history.iter().filter(|m| m.role == "user").collect();
+
     // Extract ONLY first few user messages
-    let text = history
+    let text = user_messages
         .iter()
-        .filter(|m| m.role == "user")
         .take(3)
         .filter_map(|m| m.text.as_ref())
         .cloned()
@@ -288,15 +282,30 @@ pub async fn generate_summary_message(
     }
 
     // NEW: Phi summarizer with strict JSON output and fallback.
+    let language_hint = user_messages
+        .iter()
+        .filter_map(|m| m.language.as_deref())
+        .find(|lang| !lang.trim().is_empty());
+
+    let language_instruction = match language_hint {
+        Some(lang) => format!(
+            "- The \"summary\" value must be written in {lang}.",
+            lang = lang
+        ),
+        None => "- The \"summary\" value must be written in English.".to_string(),
+    };
+
     let prompt = format!(
         r#"You output ONLY valid JSON with a single field "summary".
 - Summarize the user's request in at most 3 lower-case words.
 - Use short, meaningful keywords without punctuation.
 - If the intent is unclear or generic, set "summary" to "general request".
+{language_instruction}
 Text to summarize:
 {text}
 JSON:"#,
-        text = text
+        text = text,
+        language_instruction = language_instruction
     );
 
     let summary_raw = infer.phi.generate_with_prompt(&prompt, 64).await?;
@@ -313,6 +322,7 @@ JSON:"#,
         text: Some(summary.clone()),
         language: None,
         attachments: Vec::new(),
+        liked: false,
         ts: chrono::Utc::now().timestamp(),
     };
 

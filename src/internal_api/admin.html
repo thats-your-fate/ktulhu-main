@@ -1,0 +1,311 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>Ktulhu Admin</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+        :root {
+            font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+            background: #0b0b0f;
+            color: #f5f7ff;
+        }
+        body {
+            margin: 0;
+            padding: 24px;
+        }
+        header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 24px;
+        }
+        h1 {
+            margin: 0;
+            font-size: 1.5rem;
+        }
+        button, select {
+            background: #1f1f2e;
+            border: 1px solid #2f2f46;
+            color: inherit;
+            padding: 8px 12px;
+            border-radius: 6px;
+            cursor: pointer;
+        }
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+            gap: 16px;
+            margin-bottom: 32px;
+        }
+        .card {
+            background: #141422;
+            border: 1px solid #1f2034;
+            border-radius: 10px;
+            padding: 16px;
+        }
+        .card h3 {
+            margin: 0 0 8px 0;
+            font-size: 0.9rem;
+            color: #8a8cb5;
+        }
+        .card .value {
+            font-size: 1.8rem;
+            font-weight: 600;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            background: #13131f;
+            border: 1px solid #1f2034;
+            border-radius: 10px;
+            overflow: hidden;
+        }
+        th, td {
+            padding: 10px 12px;
+            border-bottom: 1px solid #1f2034;
+            text-align: left;
+        }
+        th {
+            background: #1b1b2e;
+            font-size: 0.85rem;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+            color: #8a8cb5;
+        }
+        tr:hover {
+            background: #1d1d31;
+        }
+        .chat-row {
+            cursor: pointer;
+        }
+        .messages-panel {
+            margin-top: 32px;
+            background: #11111c;
+            border: 1px solid #1f2034;
+            border-radius: 10px;
+            padding: 16px;
+            max-height: 60vh;
+            overflow-y: auto;
+        }
+        .message-item {
+            padding: 10px 0;
+            border-bottom: 1px solid #1f2034;
+        }
+        .message-item:last-child {
+            border-bottom: none;
+        }
+        .message-meta {
+            font-size: 0.8rem;
+            color: #8a8cb5;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .message-text {
+            margin: 6px 0;
+            white-space: pre-wrap;
+        }
+        .actions button {
+            margin-right: 8px;
+        }
+        .pill {
+            padding: 2px 8px;
+            border-radius: 999px;
+            font-size: 0.75rem;
+        }
+        .pill.assistant {
+            background: rgba(59, 130, 246, 0.2);
+            color: #93c5fd;
+        }
+        .pill.user {
+            background: rgba(16, 185, 129, 0.2);
+            color: #6ee7b7;
+        }
+        .pill.summary {
+            background: rgba(249, 115, 22, 0.2);
+            color: #fdba74;
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <h1>Mini Admin Area</h1>
+        <button id="refresh-btn">Refresh overview</button>
+    </header>
+
+    <section class="grid" id="stats-cards">
+        <div class="card">
+            <h3>Total Users</h3>
+            <div class="value" id="stat-users">-</div>
+        </div>
+        <div class="card">
+            <h3>Known Devices</h3>
+            <div class="value" id="stat-devices">-</div>
+        </div>
+        <div class="card">
+            <h3>Total Chats</h3>
+            <div class="value" id="stat-chats">-</div>
+        </div>
+        <div class="card">
+            <h3>Total Messages</h3>
+            <div class="value" id="stat-messages">-</div>
+        </div>
+        <div class="card">
+            <h3>Liked Messages</h3>
+            <div class="value" id="stat-liked">-</div>
+        </div>
+    </section>
+
+    <section>
+        <h2>Recent Chats</h2>
+        <table>
+            <thead>
+                <tr>
+                    <th>Chat ID</th>
+                    <th>Summary</th>
+                    <th>Device Hash</th>
+                    <th>Total</th>
+                    <th>Liked</th>
+                    <th>Updated</th>
+                </tr>
+            </thead>
+            <tbody id="chat-table-body">
+                <tr><td colspan="6">Loading…</td></tr>
+            </tbody>
+        </table>
+    </section>
+
+    <section class="messages-panel" id="messages-panel" hidden>
+        <h2>Messages for <span id="messages-chat-id"></span></h2>
+        <div id="message-list"></div>
+    </section>
+
+    <script>
+        const chatTableBody = document.getElementById('chat-table-body');
+        const refreshBtn = document.getElementById('refresh-btn');
+        const panel = document.getElementById('messages-panel');
+        const panelChatId = document.getElementById('messages-chat-id');
+        const messageList = document.getElementById('message-list');
+
+        refreshBtn.addEventListener('click', loadOverview);
+
+        async function loadOverview() {
+            chatTableBody.innerHTML = '<tr><td colspan="6">Loading…</td></tr>';
+            try {
+                const res = await fetch('/internal/admin/overview');
+                const data = await res.json();
+                document.getElementById('stat-users').textContent = data.total_users;
+                document.getElementById('stat-devices').textContent = data.total_devices;
+                document.getElementById('stat-chats').textContent = data.total_chats;
+                document.getElementById('stat-messages').textContent = data.total_messages;
+                document.getElementById('stat-liked').textContent = data.liked_messages;
+                renderChats(data.recent_chats);
+            } catch (err) {
+                chatTableBody.innerHTML = '<tr><td colspan="6">Failed to load overview</td></tr>';
+                console.error('overview', err);
+            }
+        }
+
+        function renderChats(chats) {
+            if (!chats.length) {
+                chatTableBody.innerHTML = '<tr><td colspan="6">No chats available</td></tr>';
+                return;
+            }
+
+            chatTableBody.innerHTML = '';
+            chats.forEach(chat => {
+                const tr = document.createElement('tr');
+                tr.className = 'chat-row';
+                tr.innerHTML = `
+                    <td>${chat.chat_id}</td>
+                    <td>${chat.summary ? escapeHtml(chat.summary) : '—'}</td>
+                    <td>${chat.device_hash ?? '—'}</td>
+                    <td>${chat.message_count}</td>
+                    <td>${chat.liked_count}</td>
+                    <td>${new Date(chat.updated_ts * 1000).toLocaleString()}</td>
+                `;
+                tr.addEventListener('click', () => loadMessages(chat.chat_id));
+                chatTableBody.appendChild(tr);
+            });
+        }
+
+        async function loadMessages(chatId) {
+            panel.hidden = false;
+            panelChatId.textContent = chatId;
+            messageList.innerHTML = 'Loading messages…';
+
+            try {
+                const res = await fetch(`/api/chats/${chatId}/messages`);
+                const data = await res.json();
+                const summaries = (data.messages || []).filter(msg => msg.role === 'summary');
+                renderMessages(chatId, summaries);
+            } catch (err) {
+                messageList.textContent = 'Failed to load messages';
+                console.error('messages', err);
+            }
+        }
+
+        function renderMessages(chatId, messages) {
+            if (!messages.length) {
+                messageList.textContent = 'No messages available';
+                return;
+            }
+
+            messageList.innerHTML = '';
+            messages.forEach(msg => {
+                const container = document.createElement('div');
+                container.className = 'message-item';
+                container.innerHTML = `
+                    <div class="message-meta">
+                        <span>
+                            <span class="pill ${msg.role}">${msg.role}</span>
+                            ${msg.language ? '· ' + msg.language : ''}
+                            · ${new Date(msg.ts * 1000).toLocaleString()}
+                        </span>
+                        <span class="actions">
+                            <button data-action="toggle-like">${msg.liked ? 'Unlike' : 'Like'}</button>
+                            <button data-action="delete" style="color:#f87171;border-color:#f87171;">Delete</button>
+                        </span>
+                    </div>
+                    <div class="message-text">${escapeHtml(msg.text ?? '')}</div>
+                `;
+                container.querySelector('[data-action="toggle-like"]').addEventListener('click', async () => {
+                    await toggleLike(chatId, msg.id, !msg.liked);
+                    loadMessages(chatId);
+                });
+                container.querySelector('[data-action="delete"]').addEventListener('click', async () => {
+                    if (!confirm('Delete this message?')) return;
+                    await deleteMessage(chatId, msg.id);
+                    loadMessages(chatId);
+                });
+                messageList.appendChild(container);
+            });
+            messageList.scrollTop = messageList.scrollHeight;
+        }
+
+        async function toggleLike(chatId, messageId, liked) {
+            await fetch(`/internal/chat-thread/${chatId}/message/${messageId}/liked`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ liked })
+            });
+        }
+
+        async function deleteMessage(chatId, messageId) {
+            await fetch(`/internal/chat-thread/${chatId}/message/${messageId}`, {
+                method: 'DELETE'
+            });
+        }
+
+        function escapeHtml(text) {
+            return text
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;');
+        }
+
+        loadOverview();
+    </script>
+</body>
+</html>

@@ -88,10 +88,7 @@ fn profile_key(profile: ReasoningProfile) -> &'static str {
     }
 }
 
-pub fn analysis_system_prompt(
-    profile: ReasoningProfile,
-    language: Option<&str>,
-) -> &'static str {
+pub fn analysis_system_prompt(profile: ReasoningProfile, language: Option<&str>) -> &'static str {
     let prompts = prompts_for_language(language);
     let key = profile_key(profile);
     prompts

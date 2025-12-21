@@ -4,12 +4,13 @@ use candle_nn::VarBuilder;
 use candle_transformers::generation::LogitsProcessor;
 use candle_transformers::models::mistral::{Config as MistralConfig, Model as Mistral};
 use tokenizers::Tokenizer;
+use tracing::info;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::{fs, path::PathBuf, sync::Arc};
 use tokio::sync::{mpsc, Mutex};
 
-use crate::conversation::STOP_SEQS;
+use crate::conversation::{trim_partial_chatml, STOP_SEQS};
 
 // ---------------------------------------------------------
 // PUBLIC SERVICE
@@ -34,6 +35,22 @@ impl MistralService {
         let tokenizer = Arc::new(
             Tokenizer::from_file(&tokenizer_path).map_err(|e| anyhow!("Tokenizer error: {e}"))?,
         );
+
+        // Sanity check emoji round-trip to catch decoding regressions.
+        {
+            let emoji_encoding = tokenizer
+                .encode("😊", false)
+                .map_err(|e| anyhow!("Tokenizer emoji encode error: {e}"))?;
+            let ids = emoji_encoding.get_ids().to_vec();
+            let decoded = tokenizer
+                .decode(ids.as_slice(), false)
+                .map_err(|e| anyhow!("Tokenizer emoji decode error: {e}"))?;
+            assert!(
+                !decoded.contains('\u{FFFD}'),
+                "Tokenizer still emits replacement character!"
+            );
+            info!("Tokenizer emoji test OK: {}", decoded);
+        }
 
         // ---- Load config ----
         let config_path = snapshot_dir.join("config.json");
@@ -128,7 +145,6 @@ pub async fn run_mistral_stream(
         .encode(EncodeInput::Single(user_prompt.into()), true)
         .map_err(|e| anyhow!("Tokenizer encode error: {e}"))?;
     let mut tokens = enc.get_ids().to_vec();
-
     let eos = tokenizer
         .token_to_id("<eos>")
         .or_else(|| tokenizer.token_to_id("</s>"))
@@ -136,6 +152,9 @@ pub async fn run_mistral_stream(
 
     let mut pos = 0usize;
     let mut lp = LogitsProcessor::new(seed(), Some(0.7), None);
+    let mut generated_tokens: Vec<u32> = Vec::new();
+    let mut emitted_len = 0usize;
+    let mut boundary_fixer = BoundaryFixer::default();
 
     const MAX_NEW_TOKENS: usize = 4096;
 
@@ -168,23 +187,50 @@ pub async fn run_mistral_stream(
             break;
         }
 
-        let mut piece = match tokenizer.decode(&[next_id], false) {
+        generated_tokens.push(next_id);
+
+        let decoded = match tokenizer.decode(&generated_tokens, false) {
             Ok(s) => s,
             Err(_) => continue,
         };
 
-        if piece.contains('\u{2581}') {
-            piece = piece.replace('\u{2581}', " ");
-        }
-        if piece.is_empty() || piece == "\u{200b}" {
+        let mut normalized = decoded.replace('\u{2581}', " ");
+        normalized = normalized.replace('\u{200b}', "");
+
+        if normalized.contains('\u{FFFD}') {
             continue;
         }
 
-        if cancel.load(Ordering::SeqCst) || tx.is_closed() {
-            return Ok(());
+        let pending_suffix = longest_stop_prefix_suffix(&normalized);
+        let safe_end = normalized.len().saturating_sub(pending_suffix);
+        let candidate = &normalized[..safe_end];
+        let cleaned = trim_partial_chatml(candidate).to_string();
+        let stop_hit = cleaned.len() < candidate.len();
+
+        if cleaned.len() < emitted_len {
+            emitted_len = cleaned.len();
         }
 
-        let _ = tx.send(piece).await;
+        if cleaned.len() > emitted_len {
+            let delta = &cleaned[emitted_len..];
+            if !delta.is_empty() {
+                if cancel.load(Ordering::SeqCst) || tx.is_closed() {
+                    return Ok(());
+                }
+
+                let formatted = boundary_fixer.apply(delta);
+                if !formatted.is_empty() {
+                    tx.send(formatted)
+                        .await
+                        .map_err(|e| anyhow!("stream send error: {e}"))?;
+                }
+            }
+            emitted_len = cleaned.len();
+        }
+
+        if stop_hit {
+            break;
+        }
 
         tokio::task::yield_now().await;
     }
@@ -271,7 +317,9 @@ async fn run_mistral_completion(
         tokio::task::yield_now().await;
     }
 
-    Ok(output)
+    let trimmed = trim_partial_chatml(&output).to_string();
+    let mut fixer = BoundaryFixer::default();
+    Ok(fixer.apply(&trimmed))
 }
 
 // ---------------------------------------------------------
@@ -283,4 +331,53 @@ fn seed() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_secs()
+}
+
+fn longest_stop_prefix_suffix(text: &str) -> usize {
+    STOP_SEQS
+        .iter()
+        .map(|seq| {
+            let max_len = seq.len().min(text.len());
+            (1..=max_len)
+                .rev()
+                .find(|len| text.ends_with(&seq[..*len]))
+                .unwrap_or(0)
+        })
+        .max()
+        .unwrap_or(0)
+}
+
+#[derive(Default)]
+struct BoundaryFixer {
+    last_char: Option<char>,
+}
+
+impl BoundaryFixer {
+    fn apply(&mut self, chunk: &str) -> String {
+        let mut out = String::with_capacity(chunk.len());
+
+        for ch in chunk.chars() {
+            if let Some(prev) = self.last_char {
+                let prev_is_alpha = prev.is_alphabetic();
+                let prev_is_digit = prev.is_ascii_digit();
+                let ch_is_alpha = ch.is_alphabetic();
+                let ch_is_digit = ch.is_ascii_digit();
+
+                if prev_is_alpha && ch_is_digit && !prev.is_whitespace() && !ch.is_whitespace() {
+                    out.push(' ');
+                } else if prev_is_digit
+                    && ch_is_alpha
+                    && !prev.is_whitespace()
+                    && !ch.is_whitespace()
+                {
+                    out.push(' ');
+                }
+            }
+
+            out.push(ch);
+            self.last_char = Some(ch);
+        }
+
+        out
+    }
 }

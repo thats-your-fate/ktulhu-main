@@ -2,15 +2,17 @@ mod executor;
 mod planner;
 mod prompts;
 
-pub use crate::classifier::routing::{profile_from_intent, select_reasoning_profile, ReasoningProfile};
+pub use crate::classifier::routing::{
+    profile_from_intent, select_reasoning_profile, ReasoningProfile,
+};
 
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
 };
 
-use anyhow::{anyhow, Result};
 use crate::{classifier::reasoning_policy::ReasoningMode, manager::ModelManager};
+use anyhow::{anyhow, Result};
 
 use executor::{inject_hidden_block, run_hidden_completion};
 use planner::{
@@ -112,8 +114,7 @@ async fn analyze_then_answer(
     }
 
     let analysis_prompt = build_analysis_prompt(user_text, profile, language);
-    let analysis =
-        run_hidden_completion(models, analysis_prompt.clone(), cancel.clone()).await?;
+    let analysis = run_hidden_completion(models, analysis_prompt.clone(), cancel.clone()).await?;
     if cancel.load(Ordering::SeqCst) {
         return Err(anyhow!("cancelled"));
     }

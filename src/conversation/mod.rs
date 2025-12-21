@@ -1,4 +1,4 @@
-use crate::model::message::Message;
+use crate::{attachments::message_attachment_summaries, model::message::Message};
 use serde::{Deserialize, Serialize};
 
 pub const STOP_SEQS: &[&str] = &["<|", "<|im_end|>"];
@@ -28,10 +28,7 @@ impl Role {
 /// - The assistant block is intentionally LEFT OPEN.
 /// - The model is EXPECTED to emit `<|im_end|>`.
 /// - Inference MUST stop on `<|im_end|>`.
-pub fn build_mistral_prompt(
-    history: &[Message],
-    system_prompt: Option<&str>,
-) -> String {
+pub fn build_mistral_prompt(history: &[Message], system_prompt: Option<&str>) -> String {
     let mut out = String::new();
 
     // Exactly one system prompt (preferred)
@@ -53,10 +50,21 @@ pub fn build_mistral_prompt(
             continue;
         };
 
+        let mut body = sanitize_chatml_text(text);
+        let attachment_notes = message_attachment_summaries(&msg.attachments);
+        if !attachment_notes.is_empty() {
+            body.push_str("\n\n[Attachments]\n");
+            for note in attachment_notes {
+                body.push_str("- ");
+                body.push_str(&sanitize_chatml_text(&note));
+                body.push('\n');
+            }
+        }
+
         out.push_str("<|im_start|>");
         out.push_str(role.as_chatml());
         out.push('\n');
-        out.push_str(&sanitize_chatml_text(text));
+        out.push_str(&body);
         out.push_str("\n<|im_end|>\n");
     }
 
@@ -85,8 +93,7 @@ pub fn trim_history(mut history: Vec<Message>, max_messages: usize) -> Vec<Messa
 ///
 /// This prevents users from breaking prompt structure.
 pub fn sanitize_chatml_text(text: &str) -> String {
-    text.replace("<|", "<\\|")
-        .replace("|>", "|\\>")
+    text.replace("<|", "<\\|").replace("|>", "|\\>")
 }
 
 /// Remove ChatML structural markers and role headers from generated text.
@@ -131,9 +138,15 @@ pub fn strip_chatml_markers(text: &str) -> String {
 
 /// Trim output if a new ChatML block was partially emitted.
 pub fn trim_partial_chatml(text: &str) -> &str {
-    if let Some(pos) = text.find("<|im") {
-        &text[..pos]
-    } else {
-        text
+    let mut end = STOP_SEQS
+        .iter()
+        .filter_map(|seq| text.find(seq))
+        .min()
+        .unwrap_or(text.len());
+
+    if end > 0 && text[..end].ends_with('<') {
+        end -= 1;
     }
+
+    &text[..end]
 }

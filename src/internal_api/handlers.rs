@@ -1,6 +1,8 @@
 use crate::{model::chat::Chat, model::message::Message, ws::AppState};
 
-use axum::{extract::Path, extract::State, Json};
+use axum::{extract::Path, extract::State, response::Html, Json};
+use chrono::Utc;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::cmp::Reverse;
 use uuid::Uuid;
@@ -9,6 +11,87 @@ use uuid::Uuid;
 pub struct MessagesResponse {
     pub chat_id: String,
     pub messages: Vec<Message>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AdminOverview {
+    pub total_users: usize,
+    pub total_devices: usize,
+    pub total_chats: usize,
+    pub total_messages: usize,
+    pub liked_messages: usize,
+    pub recent_chats: Vec<AdminChatSummary>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AdminChatSummary {
+    pub chat_id: String,
+    pub summary: Option<String>,
+    pub device_hash: Option<String>,
+    pub message_count: usize,
+    pub liked_count: usize,
+    pub updated_ts: i64,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SummaryUpdatePayload {
+    pub summary: String,
+    #[serde(default)]
+    pub language: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MessageLikePayload {
+    pub liked: bool,
+}
+
+pub async fn update_summary(
+    Path(chat_id): Path<String>,
+    State(state): State<AppState>,
+    Json(payload): Json<SummaryUpdatePayload>,
+) -> Json<serde_json::Value> {
+    if payload.summary.trim().is_empty() {
+        return Json(json!({
+            "chat_id": chat_id,
+            "updated": false,
+            "error": "summary cannot be empty"
+        }));
+    }
+
+    if let Err(err) = state.db.remove_messages_by_role(&chat_id, "summary").await {
+        return Json(json!({
+            "chat_id": chat_id,
+            "updated": false,
+            "error": err.to_string()
+        }));
+    }
+
+    let msg = Message {
+        id: Uuid::new_v4().to_string(),
+        chat_id: chat_id.clone(),
+        session_id: None,
+        user_id: None,
+        device_hash: None,
+        role: "summary".into(),
+        text: Some(payload.summary.trim().to_string()),
+        language: payload.language.clone(),
+        attachments: Vec::new(),
+        liked: false,
+        ts: Utc::now().timestamp(),
+    };
+
+    match state.db.save_message(&msg).await {
+        Ok(()) => Json(json!({
+            "chat_id": chat_id,
+            "summary_id": msg.id,
+            "updated": true
+        })),
+        Err(err) => Json(json!({
+            "chat_id": chat_id,
+            "updated": false,
+            "error": err.to_string()
+        })),
+    }
 }
 
 pub async fn get_thread(
@@ -125,6 +208,64 @@ pub async fn list_messages_for_chat(
     })
 }
 
+pub async fn delete_message(
+    Path((chat_id, message_id)): Path<(String, String)>,
+    State(state): State<AppState>,
+) -> Json<serde_json::Value> {
+    match state.db.delete_message(&chat_id, &message_id).await {
+        Ok(true) => Json(json!({
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "deleted": true
+        })),
+        Ok(false) => Json(json!({
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "deleted": false,
+            "error": "message_not_found"
+        })),
+        Err(e) => Json(json!({
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "deleted": false,
+            "error": e.to_string()
+        })),
+    }
+}
+
+pub async fn set_message_liked(
+    Path((chat_id, message_id)): Path<(String, String)>,
+    State(state): State<AppState>,
+    Json(payload): Json<MessageLikePayload>,
+) -> Json<serde_json::Value> {
+    match state
+        .db
+        .set_message_liked(&chat_id, &message_id, payload.liked)
+        .await
+    {
+        Ok(true) => Json(json!({
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "liked": payload.liked,
+            "updated": true
+        })),
+        Ok(false) => Json(json!({
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "liked": payload.liked,
+            "updated": false,
+            "error": "message_not_found"
+        })),
+        Err(e) => Json(json!({
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "liked": payload.liked,
+            "updated": false,
+            "error": e.to_string()
+        })),
+    }
+}
+
 /// Ensure a chat exists for the given id/device; create one if missing.
 pub async fn ensure_chat_for_device(
     db: &crate::db::DBLayer,
@@ -169,4 +310,58 @@ pub async fn list_chats_by_user(
         "count": chats.len(),
         "chats": chats
     })))
+}
+
+pub async fn admin_page() -> Html<&'static str> {
+    Html(include_str!("admin.html"))
+}
+
+pub async fn admin_overview(State(state): State<AppState>) -> Json<AdminOverview> {
+    let users = state.db.list_users().await.unwrap_or_default();
+    let devices = state.db.list_all_devices().await.unwrap_or_default();
+    let chats = state.db.list_chats().await.unwrap_or_default();
+
+    let mut total_messages = 0usize;
+    let mut liked_messages = 0usize;
+    let mut chat_rows = Vec::new();
+
+    for chat in chats.iter() {
+        let messages = state
+            .db
+            .list_messages_for_chat(&chat.id)
+            .await
+            .unwrap_or_default();
+        let liked_count = messages.iter().filter(|m| m.liked).count();
+        let message_count = messages.len();
+
+        total_messages += message_count;
+        liked_messages += liked_count;
+
+        let summary_text = messages
+            .iter()
+            .rev()
+            .find(|m| m.role == "summary")
+            .and_then(|m| m.text.clone());
+
+        chat_rows.push(AdminChatSummary {
+            chat_id: chat.id.clone(),
+            summary: summary_text,
+            device_hash: chat.device_hash.clone(),
+            message_count,
+            liked_count,
+            updated_ts: chat.updated_ts,
+        });
+    }
+
+    chat_rows.sort_by_key(|c| Reverse(c.updated_ts));
+    chat_rows.truncate(25);
+
+    Json(AdminOverview {
+        total_users: users.len(),
+        total_devices: devices.len(),
+        total_chats: chats.len(),
+        total_messages,
+        liked_messages,
+        recent_chats: chat_rows,
+    })
 }

@@ -18,9 +18,8 @@ use crate::db::DBLayer;
 use crate::inference::InferenceService;
 use crate::manager::ModelManager;
 use crate::model::chat::Chat;
-use crate::model::message::Message;
+use crate::model::message::{Message, MessageAttachment};
 use crate::reasoning::{run_reasoning, ReasoningProfile, ReasoningResult};
-use crate::storage::StorageService;
 use crate::ws::inference_worker::{InferenceJob, InferenceWorker};
 use anyhow::anyhow;
 use tracing::{debug, info};
@@ -37,7 +36,6 @@ pub struct AppState {
     pub jwt_secret: String,
     pub google_client_id: String,
     pub apple_client_id: String,
-    pub storage: Arc<StorageService>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -152,16 +150,21 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                         // 1) CLASSIFICATION — this is the only added section
                         // -----------------------------------------------------
                         let attachment_notes = attachment_summaries(&parsed.attachments);
-                        let mut enriched_text = parsed.text.clone();
+                        let classification_text = if attachment_notes.is_empty() {
+                            parsed.text.clone()
+                        } else {
+                            let mut augmented = parsed.text.clone();
+                            augmented.push_str("\n\n[Attachments]\n");
+                            for note in &attachment_notes {
+                                augmented.push_str("- ");
+                                augmented.push_str(note);
+                                augmented.push('\n');
+                            }
+                            augmented
+                        };
                         let attachment_summary_combined = if attachment_notes.is_empty() {
                             None
                         } else {
-                            enriched_text.push_str("\n\n[Attachments]\n");
-                            for note in &attachment_notes {
-                                enriched_text.push_str("- ");
-                                enriched_text.push_str(note);
-                                enriched_text.push('\n');
-                            }
                             let combined = attachment_notes.join("\n");
                             info!(
                                 chat_id = parsed.chat_id.as_str(),
@@ -173,16 +176,32 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                             Some(combined)
                         };
 
+                        let stored_attachments: Vec<MessageAttachment> = parsed
+                            .attachments
+                            .iter()
+                            .map(|att| MessageAttachment {
+                                id: att.id.clone(),
+                                filename: att.filename.clone(),
+                                mime_type: att.mime_type.clone(),
+                                preview_base64: att.preview_base64.clone(),
+                                path: att.path.clone(),
+                                size: None,
+                                description: att.description.clone(),
+                                ocr_text: att.ocr_text.clone(),
+                                labels: att.labels.clone().unwrap_or_default(),
+                            })
+                            .collect();
+
                         let scope = crate::classifier::scope::classify_scope(
                             &state.models,
-                            enriched_text.as_str(),
+                            classification_text.as_str(),
                         )
                         .await
                         .unwrap_or_else(|_| "unknown".into());
 
                         let routing_result = match crate::classifier::routing::route_intent(
                             &state.models,
-                            enriched_text.as_str(),
+                            classification_text.as_str(),
                             parsed.language.as_deref(),
                         )
                         .await
@@ -197,17 +216,12 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                         info!(
                             chat_id = parsed.chat_id.as_str(),
                             request_id = parsed.request_id.as_str(),
-                            provided_language = parsed
-                                .language
-                                .as_deref()
-                                .unwrap_or(""),
+                            provided_language = parsed.language.as_deref().unwrap_or(""),
                             routing_language = routing_result.language.as_str(),
                             "intent routing language resolved"
                         );
 
                         let routing_language = routing_result.language.clone();
-
-
 
                         for note in &routing_result.notes {
                             info!(
@@ -245,7 +259,6 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                             break 'socket_loop;
                         }
 
-
                         // Ensure chat exists (create if missing)
                         let chat_id = match ensure_chat_for_device(
                             &state.db,
@@ -257,7 +270,8 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                             Ok(cid) => cid,
                             Err(e) => {
                                 eprintln!("failed to ensure chat: {e}");
-                                if let Err(err) = send_json(&tx, json_error("chat_init_failed")).await
+                                if let Err(err) =
+                                    send_json(&tx, json_error("chat_init_failed")).await
                                 {
                                     eprintln!("failed to send ws message: {err}");
                                     break 'socket_loop;
@@ -283,7 +297,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                             }
                         }
 
-                        let mut user_text = enriched_text.clone();
+                        let mut user_text = parsed.text.clone();
 
                         if let Some(combined) = attachment_summary_combined.clone() {
                             debug!("attachment descriptions provided: {}", combined);
@@ -325,7 +339,8 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                             role: "user".into(),
                             text: Some(user_text.clone()),
                             language: Some(routing_language.clone()),
-                            attachments: Vec::new(),
+                            attachments: stored_attachments.clone(),
+                            liked: false,
                             ts: chrono::Utc::now().timestamp(),
                         };
 
@@ -396,24 +411,20 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                         );
                         let mut reasoning_timed_out = false;
                         let mut reasoning_failed = false;
-                        let reasoning_result = match timeout(
-                            Duration::from_secs(12),
-                            reasoning_future,
-                        )
-                        .await
-                        {
-                            Ok(Ok(result)) => result,
-                            Ok(Err(err)) => {
-                                eprintln!("reasoning failed: {err}");
-                                reasoning_failed = true;
-                                ReasoningResult::fallback(&base_prompt)
-                            }
-                            Err(_) => {
-                                eprintln!("reasoning timed out");
-                                reasoning_timed_out = true;
-                                ReasoningResult::fallback(&base_prompt)
-                            }
-                        };
+                        let reasoning_result =
+                            match timeout(Duration::from_secs(12), reasoning_future).await {
+                                Ok(Ok(result)) => result,
+                                Ok(Err(err)) => {
+                                    eprintln!("reasoning failed: {err}");
+                                    reasoning_failed = true;
+                                    ReasoningResult::fallback(&base_prompt)
+                                }
+                                Err(_) => {
+                                    eprintln!("reasoning timed out");
+                                    reasoning_timed_out = true;
+                                    ReasoningResult::fallback(&base_prompt)
+                                }
+                            };
 
                         if reasoning_timed_out || reasoning_failed {
                             let mut s = session.lock().await;
@@ -445,18 +456,12 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                             info!(
                                 chat_id = parsed.chat_id.as_str(),
                                 request_id = parsed.request_id.as_str(),
-                                intermediate_prompt = debug_info
-                                    .intermediate_prompt
-                                    .as_deref()
-                                    .unwrap_or(""),
-                                intermediate_output = debug_info
-                                    .intermediate_output
-                                    .as_deref()
-                                    .unwrap_or(""),
-                                validation_output = debug_info
-                                    .validation_output
-                                    .as_deref()
-                                    .unwrap_or(""),
+                                intermediate_prompt =
+                                    debug_info.intermediate_prompt.as_deref().unwrap_or(""),
+                                intermediate_output =
+                                    debug_info.intermediate_output.as_deref().unwrap_or(""),
+                                validation_output =
+                                    debug_info.validation_output.as_deref().unwrap_or(""),
                                 hidden_block = debug_info.hidden_block.as_deref().unwrap_or(""),
                                 "reasoning debug info"
                             );

@@ -229,10 +229,7 @@ fn load_language_keywords(lang: &str) -> LanguageKeywordSet {
                 )),
                 emotional_keywords: parse_string_list(lang_file!($lang, "keywords.json")),
                 casual_markers: parse_string_list(lang_file!($lang, "casual_markers.json")),
-                reasoning_markers: parse_string_list(lang_file!(
-                    $lang,
-                    "reasoning_patterns.json"
-                )),
+                reasoning_markers: parse_string_list(lang_file!($lang, "reasoning_patterns.json")),
                 constraint_markers: parse_string_list(lang_file!(
                     $lang,
                     "constraint_patterns.json"
@@ -391,13 +388,8 @@ pub async fn route_intent(
     }
 
     let clarification_needed = false;
-    let detected_profile = select_reasoning_profile(
-        models,
-        text,
-        Some(resolved_language),
-        intent.as_str(),
-    )
-    .await;
+    let detected_profile =
+        select_reasoning_profile(models, text, Some(resolved_language), intent.as_str()).await;
 
     Ok(IntentRoutingResult {
         intent,
@@ -688,7 +680,10 @@ fn has_emotional_language(text: &str, keywords: &LanguageKeywordSet) -> bool {
 
 fn is_chat_casual_allowed(text: &str, keywords: &LanguageKeywordSet) -> bool {
     let lower = text.to_lowercase();
-    let has_casual = keywords.casual_markers.iter().any(|marker| lower.contains(marker));
+    let has_casual = keywords
+        .casual_markers
+        .iter()
+        .any(|marker| lower.contains(marker));
     let is_short = lower.chars().count() <= 60;
 
     (has_emotional_language(&lower, keywords) || has_casual || is_short)

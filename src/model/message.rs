@@ -13,6 +13,8 @@ pub struct Message {
     pub language: Option<String>,
     #[serde(default)]
     pub attachments: Vec<MessageAttachment>,
+    #[serde(default)]
+    pub liked: bool,
     pub ts: i64,
 }
 
@@ -22,6 +24,16 @@ pub struct MessageAttachment {
     pub filename: String,
     #[serde(default)]
     pub mime_type: Option<String>,
-    pub path: String,
-    pub size: usize,
+    #[serde(default)]
+    pub preview_base64: Option<String>,
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub size: Option<usize>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub ocr_text: Option<String>,
+    #[serde(default)]
+    pub labels: Vec<String>,
 }

@@ -64,6 +64,52 @@ impl DBLayer {
         Ok(results)
     }
 
+    fn find_message_entry(
+        &self,
+        chat_id: &str,
+        message_id: &str,
+    ) -> Result<Option<(Vec<u8>, Message)>> {
+        let prefix = format!("chat:{}:msg:", chat_id);
+        for item in self
+            .db
+            .iterator(IteratorMode::From(prefix.as_bytes(), Direction::Forward))
+        {
+            let (key, val) = item?;
+            let k = str::from_utf8(&key)?;
+            if !k.starts_with(&prefix) {
+                break;
+            }
+
+            let msg: Message = serde_json::from_slice(&val)?;
+            if msg.id == message_id {
+                return Ok(Some((key.to_vec(), msg)));
+            }
+        }
+        Ok(None)
+    }
+
+    pub async fn delete_message(&self, chat_id: &str, message_id: &str) -> Result<bool> {
+        if let Some((key, _)) = self.find_message_entry(chat_id, message_id)? {
+            self.db.delete(key)?;
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    pub async fn set_message_liked(
+        &self,
+        chat_id: &str,
+        message_id: &str,
+        liked: bool,
+    ) -> Result<bool> {
+        if let Some((key, mut msg)) = self.find_message_entry(chat_id, message_id)? {
+            msg.liked = liked;
+            self.db.put(key, serde_json::to_vec(&msg)?)?;
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
     /// Get last N messages (for context pruning)
     pub async fn list_last_messages(&self, chat_id: &str, n: usize) -> Result<Vec<Message>> {
         let prefix = format!("chat:{}:msg:", chat_id);
@@ -184,6 +230,33 @@ impl DBLayer {
         Ok(())
     }
 
+    pub async fn remove_messages_by_role(&self, chat_id: &str, role: &str) -> Result<usize> {
+        let prefix = format!("chat:{}:msg:", chat_id);
+        let mut keys = Vec::new();
+
+        for item in self
+            .db
+            .iterator(IteratorMode::From(prefix.as_bytes(), Direction::Forward))
+        {
+            let (key, val) = item?;
+            let k = str::from_utf8(&key)?;
+            if !k.starts_with(&prefix) {
+                break;
+            }
+
+            let msg: Message = serde_json::from_slice(&val)?;
+            if msg.role == role {
+                keys.push(key);
+            }
+        }
+
+        for key in &keys {
+            self.db.delete(key)?;
+        }
+
+        Ok(keys.len())
+    }
+
     // ============================================================
     // USER STORAGE
     // ============================================================
@@ -296,6 +369,25 @@ impl DBLayer {
             }
             out.push(serde_json::from_slice(&val)?);
         }
+        Ok(out)
+    }
+
+    pub async fn list_all_devices(&self) -> Result<Vec<UserDevice>> {
+        let prefix = "user_device:";
+        let mut out = Vec::new();
+
+        for item in self
+            .db
+            .iterator(IteratorMode::From(prefix.as_bytes(), Direction::Forward))
+        {
+            let (key, val) = item?;
+            let k = std::str::from_utf8(&key)?;
+            if !k.starts_with(prefix) {
+                break;
+            }
+            out.push(serde_json::from_slice(&val)?);
+        }
+
         Ok(out)
     }
 

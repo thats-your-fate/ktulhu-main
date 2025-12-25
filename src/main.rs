@@ -12,6 +12,7 @@ mod auth;
 mod classifier;
 mod conversation;
 mod db;
+mod external_api;
 mod inference;
 mod internal_api;
 mod manager;
@@ -120,6 +121,7 @@ async fn main() -> anyhow::Result<()> {
         .merge(ws::ws_router())
         .merge(auth::router())
         .merge(internal_api::router())
+        .merge(external_api::router())
         .layer(
             CorsLayer::new()
                 .allow_origin(Any)

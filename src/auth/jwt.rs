@@ -1,5 +1,5 @@
 use anyhow::Result;
-use jsonwebtoken::{encode, EncodingKey, Header};
+use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize)]
@@ -23,4 +23,13 @@ pub fn make_jwt(user_id: &str) -> Result<String> {
         &EncodingKey::from_secret(key.as_bytes()),
     )?;
     Ok(token)
+}
+
+pub fn decode_jwt(token: &str, secret: &str) -> Result<String> {
+    let data = decode::<Claims>(
+        token,
+        &DecodingKey::from_secret(secret.as_bytes()),
+        &Validation::default(),
+    )?;
+    Ok(data.claims.sub)
 }

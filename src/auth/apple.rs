@@ -6,7 +6,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use uuid::Uuid;
 
-use crate::{db::DBLayer, model::user::User, ws::AppState};
+use crate::{
+    db::DBLayer,
+    model::user::{User, UserRole},
+    ws::AppState,
+};
 
 #[derive(Deserialize)]
 pub struct AppleAuthRequest {
@@ -243,6 +247,7 @@ pub async fn upsert_apple_user(db: &DBLayer, claims: &AppleIdClaims) -> anyhow::
             "auth_methods": [provider_id],
         })),
         password_hash: None,
+        role: UserRole::Free,
     };
 
     db.save_user(&user).await?;

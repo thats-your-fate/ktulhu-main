@@ -4,7 +4,7 @@ use jsonwebtoken::{decode, decode_header, Algorithm, Validation};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    model::user::User,
+    model::user::{User, UserRole},
     ws::AppState,
 };
 use super::google_keys::*;
@@ -79,6 +79,7 @@ pub async fn google_auth_handler(
             created_ts: Utc::now().timestamp(),
             meta: None,
             password_hash: None,
+            role: UserRole::Free,
         };
         state
             .db

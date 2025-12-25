@@ -1,6 +1,10 @@
 use crate::{model::chat::Chat, model::message::Message, ws::AppState};
 
-use axum::{extract::Path, extract::State, response::Html, Json};
+use axum::{
+    extract::{Path, Query, State},
+    response::Html,
+    Json,
+};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -43,6 +47,16 @@ pub struct SummaryUpdatePayload {
 #[derive(Debug, Deserialize)]
 pub struct MessageLikePayload {
     pub liked: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct LatestMessagesQuery {
+    #[serde(default = "default_latest_limit")]
+    pub limit: usize,
+}
+
+fn default_latest_limit() -> usize {
+    25
 }
 
 pub async fn update_summary(
@@ -310,6 +324,26 @@ pub async fn list_chats_by_user(
         "count": chats.len(),
         "chats": chats
     })))
+}
+
+pub async fn admin_latest_messages(
+    State(state): State<AppState>,
+    Query(query): Query<LatestMessagesQuery>,
+) -> Json<serde_json::Value> {
+    let limit = query.limit.clamp(1, 200);
+    match state.db.list_recent_messages(limit).await {
+        Ok(messages) => Json(json!({
+            "limit": limit,
+            "count": messages.len(),
+            "messages": messages
+        })),
+        Err(err) => Json(json!({
+            "limit": limit,
+            "count": 0,
+            "messages": [],
+            "error": err.to_string()
+        })),
+    }
 }
 
 pub async fn admin_page() -> Html<&'static str> {

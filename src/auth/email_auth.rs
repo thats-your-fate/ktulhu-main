@@ -4,7 +4,10 @@ use uuid::Uuid;
 
 use crate::auth::types::*;
 use crate::auth::utils::*;
-use crate::{model::user::User, ws::AppState};
+use crate::{
+    model::user::{User, UserRole},
+    ws::AppState,
+};
 
 pub async fn email_register_handler(
     State(state): State<AppState>,
@@ -42,6 +45,7 @@ pub async fn email_register_handler(
             "auth_methods": ["email"]
         })),
         password_hash: Some(hash),
+        role: UserRole::Free,
     };
 
     state

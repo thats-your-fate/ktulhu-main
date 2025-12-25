@@ -6,9 +6,9 @@ use axum::{
 
 pub mod handlers;
 use handlers::{
-    admin_overview, admin_page, delete_message, delete_thread, get_thread, list_chats_by_device,
-    list_chats_by_user, list_messages_by_device, list_messages_for_chat, set_message_liked,
-    update_summary,
+    admin_latest_messages, admin_overview, admin_page, delete_message, delete_thread, get_thread,
+    list_chats_by_device, list_chats_by_user, list_messages_by_device, list_messages_for_chat,
+    set_message_liked, update_summary,
 };
 
 pub fn router() -> Router<AppState> {
@@ -44,4 +44,5 @@ pub fn router() -> Router<AppState> {
         .route("/api/chats/{chat_id}/messages", get(list_messages_for_chat))
         .route("/internal/admin", get(admin_page))
         .route("/internal/admin/overview", get(admin_overview))
+        .route("/internal/admin/last", get(admin_latest_messages))
 }

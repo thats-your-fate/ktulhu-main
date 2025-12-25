@@ -348,14 +348,8 @@ pub async fn route_intent(
     }
 
     if intent == "chat_casual" && !is_chat_casual_allowed(text, language_pack) {
-        let forced = select_fallback_intent(text, intent.as_str(), language_pack);
-        if forced != intent {
-            notes.push(format!(
-                "chat_casual disallowed; forcing {}",
-                forced.as_str()
-            ));
-            intent = forced;
-        }
+        notes.push("chat_casual disallowed; keeping intent".to_string());
+        // do NOT force task_short here
     }
 
     let mut confidence_threshold = if intent == "reasoning_logical" {

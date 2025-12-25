@@ -8,7 +8,11 @@ use serde_json::json;
 use uuid::Uuid;
 
 use super::google_keys::GoogleJwkCache;
-use crate::{db::DBLayer, model::user::User, ws::AppState};
+use crate::{
+    db::DBLayer,
+    model::user::{User, UserRole},
+    ws::AppState,
+};
 
 #[derive(Deserialize)]
 pub struct GoogleAuthRequest {
@@ -189,6 +193,7 @@ async fn upsert_google_user(db: &DBLayer, claims: &GoogleClaims) -> anyhow::Resu
             "auth_methods": [provider_id],
         })),
         password_hash: None,
+        role: UserRole::Free,
     };
 
     db.save_user(&user).await?;

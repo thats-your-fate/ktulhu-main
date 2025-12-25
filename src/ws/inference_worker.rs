@@ -287,13 +287,16 @@ pub async fn generate_summary_message(
         .filter_map(|m| m.language.as_deref())
         .find(|lang| !lang.trim().is_empty());
 
-    let language_instruction = match language_hint {
-        Some(lang) => format!(
-            "- The \"summary\" value must be written in {lang}.",
-            lang = lang
-        ),
-        None => "- The \"summary\" value must be written in English.".to_string(),
-    };
+    let normalized_lang = language_hint.and_then(|lang| normalize_language_code(lang));
+    let language_instruction = normalized_lang
+        .as_deref()
+        .map(|code| {
+            format!(
+                "- The \"summary\" value must be written in {}.",
+                language_display_name(code)
+            )
+        })
+        .unwrap_or_else(|| "- The \"summary\" value must be written in English.".to_string());
 
     let prompt = format!(
         r#"You output ONLY valid JSON with a single field "summary".
@@ -320,7 +323,7 @@ JSON:"#,
         device_hash: None,
         role: "summary".into(),
         text: Some(summary.clone()),
-        language: None,
+        language: normalized_lang.clone(),
         attachments: Vec::new(),
         liked: false,
         ts: chrono::Utc::now().timestamp(),
@@ -337,6 +340,7 @@ JSON:"#,
         "role": "summary",
         "text": summary,
         "ts": msg.ts,
+        "language": normalized_lang,
     });
 
     let _ = ws_tx
@@ -388,5 +392,32 @@ fn normalize_summary(text: &str) -> String {
         "general request".to_string()
     } else {
         cleaned
+    }
+}
+
+fn normalize_language_code(raw: &str) -> Option<String> {
+    let normalized = raw
+        .split(|c| c == '-' || c == '_')
+        .next()
+        .map(|part| part.trim().to_lowercase())
+        .unwrap_or_default();
+
+    if normalized.is_empty() {
+        None
+    } else {
+        Some(normalized)
+    }
+}
+
+fn language_display_name(code: &str) -> String {
+    match code {
+        "es" => "Spanish".to_string(),
+        "pt" => "Portuguese".to_string(),
+        "ru" => "Russian".to_string(),
+        "fr" => "French".to_string(),
+        "de" => "German".to_string(),
+        "it" => "Italian".to_string(),
+        "en" => "English".to_string(),
+        _ => code.to_string(),
     }
 }

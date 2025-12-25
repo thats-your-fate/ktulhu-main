@@ -14,7 +14,8 @@
             margin: 0;
             padding: 24px;
         }
-        header {
+        header,
+        nav {
             display: flex;
             justify-content: space-between;
             align-items: center;
@@ -31,6 +32,40 @@
             padding: 8px 12px;
             border-radius: 6px;
             cursor: pointer;
+        }
+        .admin-nav {
+            gap: 16px;
+            background: #111122;
+            border: 1px solid #1f2034;
+            border-radius: 10px;
+            padding: 12px 16px;
+        }
+        .admin-nav strong {
+            font-size: 0.9rem;
+            letter-spacing: 0.05em;
+            color: #8a8cb5;
+            text-transform: uppercase;
+        }
+        .admin-nav-links {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            margin: 0;
+            padding: 0;
+            list-style: none;
+        }
+        .admin-nav-links a {
+            color: inherit;
+            text-decoration: none;
+            padding: 6px 10px;
+            border-radius: 6px;
+            background: #1a1a2c;
+            border: 1px solid #2f2f46;
+            font-size: 0.9rem;
+        }
+        .admin-nav-links a:hover {
+            border-color: #6366f1;
+            color: #c7d2fe;
         }
         .grid {
             display: grid;
@@ -65,6 +100,8 @@
             padding: 10px 12px;
             border-bottom: 1px solid #1f2034;
             text-align: left;
+            word-break: break-word;
+            max-width: 0;
         }
         th {
             background: #1b1b2e;
@@ -79,14 +116,34 @@
         .chat-row {
             cursor: pointer;
         }
+        .chat-row.selected {
+            background: #2f2459;
+        }
+        .workspace {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+            gap: 20px;
+            align-items: start;
+        }
+        @media (min-width: 960px) {
+            .workspace {
+                grid-template-columns: 1fr 1fr;
+            }
+        }
+        .threads-panel,
         .messages-panel {
-            margin-top: 32px;
             background: #11111c;
             border: 1px solid #1f2034;
             border-radius: 10px;
             padding: 16px;
-            max-height: 60vh;
+        }
+        .threads-panel {
+            min-height: 400px;
+        }
+        .messages-panel {
+            max-height: 70vh;
             overflow-y: auto;
+            min-height: 400px;
         }
         .message-item {
             padding: 10px 0;
@@ -105,6 +162,8 @@
         .message-text {
             margin: 6px 0;
             white-space: pre-wrap;
+            word-break: break-word;
+            overflow-wrap: anywhere;
         }
         .actions button {
             margin-right: 8px;
@@ -134,6 +193,11 @@
         <button id="refresh-btn">Refresh overview</button>
     </header>
 
+    <nav class="admin-nav">
+        <strong>Admin Routes</strong>
+        <ul class="admin-nav-links" id="admin-route-list"></ul>
+    </nav>
+
     <section class="grid" id="stats-cards">
         <div class="card">
             <h3>Total Users</h3>
@@ -157,38 +221,49 @@
         </div>
     </section>
 
-    <section>
-        <h2>Recent Chats</h2>
-        <table>
-            <thead>
-                <tr>
-                    <th>Chat ID</th>
-                    <th>Summary</th>
-                    <th>Device Hash</th>
-                    <th>Total</th>
-                    <th>Liked</th>
-                    <th>Updated</th>
-                </tr>
-            </thead>
-            <tbody id="chat-table-body">
-                <tr><td colspan="6">Loading…</td></tr>
-            </tbody>
-        </table>
-    </section>
+    <section class="workspace">
+        <div class="threads-panel">
+            <h2>Recent Chats</h2>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Chat ID</th>
+                        <th>Summary</th>
+                        <th>Device Hash</th>
+                        <th>Total</th>
+                        <th>Liked</th>
+                        <th>Updated</th>
+                    </tr>
+                </thead>
+                <tbody id="chat-table-body">
+                    <tr><td colspan="6">Loading…</td></tr>
+                </tbody>
+            </table>
+        </div>
 
-    <section class="messages-panel" id="messages-panel" hidden>
-        <h2>Messages for <span id="messages-chat-id"></span></h2>
-        <div id="message-list"></div>
+        <section class="messages-panel" id="messages-panel">
+            <h2>Messages for <span id="messages-chat-id">—</span></h2>
+            <div id="message-list">Select a chat to load messages.</div>
+        </section>
     </section>
 
     <script>
+        const adminRouteList = document.getElementById('admin-route-list');
         const chatTableBody = document.getElementById('chat-table-body');
         const refreshBtn = document.getElementById('refresh-btn');
         const panel = document.getElementById('messages-panel');
         const panelChatId = document.getElementById('messages-chat-id');
         const messageList = document.getElementById('message-list');
+        let selectedChatId = null;
+
+        const adminRoutes = [
+            { label: 'Admin Overview', path: '/internal/admin/overview' },
+            { label: 'Latest Raw Messages', path: '/internal/admin/last?limit=50' },
+            { label: 'Admin UI', path: '/internal/admin' },
+        ];
 
         refreshBtn.addEventListener('click', loadOverview);
+        renderAdminRoutes();
 
         async function loadOverview() {
             chatTableBody.innerHTML = '<tr><td colspan="6">Loading…</td></tr>';
@@ -217,6 +292,9 @@
             chats.forEach(chat => {
                 const tr = document.createElement('tr');
                 tr.className = 'chat-row';
+                if (chat.chat_id === selectedChatId) {
+                    tr.classList.add('selected');
+                }
                 tr.innerHTML = `
                     <td>${chat.chat_id}</td>
                     <td>${chat.summary ? escapeHtml(chat.summary) : '—'}</td>
@@ -225,21 +303,36 @@
                     <td>${chat.liked_count}</td>
                     <td>${new Date(chat.updated_ts * 1000).toLocaleString()}</td>
                 `;
-                tr.addEventListener('click', () => loadMessages(chat.chat_id));
+                tr.addEventListener('click', () => selectChat(chat.chat_id));
                 chatTableBody.appendChild(tr);
             });
         }
 
+        function highlightSelectedRow(chatId) {
+            document.querySelectorAll('.chat-row').forEach(row => {
+                if (row.firstElementChild && row.firstElementChild.textContent === chatId) {
+                    row.classList.add('selected');
+                } else {
+                    row.classList.remove('selected');
+                }
+            });
+        }
+
+        function selectChat(chatId) {
+            selectedChatId = chatId;
+            highlightSelectedRow(chatId);
+            loadMessages(chatId);
+        }
+
         async function loadMessages(chatId) {
-            panel.hidden = false;
             panelChatId.textContent = chatId;
             messageList.innerHTML = 'Loading messages…';
 
             try {
                 const res = await fetch(`/api/chats/${chatId}/messages`);
                 const data = await res.json();
-                const summaries = (data.messages || []).filter(msg => msg.role === 'summary');
-                renderMessages(chatId, summaries);
+                const messages = (data.messages || []).slice().sort((a, b) => a.ts - b.ts);
+                renderMessages(chatId, messages);
             } catch (err) {
                 messageList.textContent = 'Failed to load messages';
                 console.error('messages', err);
@@ -282,6 +375,18 @@
                 messageList.appendChild(container);
             });
             messageList.scrollTop = messageList.scrollHeight;
+        }
+
+        function renderAdminRoutes() {
+            adminRouteList.innerHTML = '';
+            adminRoutes.forEach(route => {
+                const li = document.createElement('li');
+                const link = document.createElement('a');
+                link.href = route.path;
+                link.textContent = route.label;
+                li.appendChild(link);
+                adminRouteList.appendChild(li);
+            });
         }
 
         async function toggleLike(chatId, messageId, liked) {

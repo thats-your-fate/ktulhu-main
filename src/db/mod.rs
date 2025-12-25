@@ -4,7 +4,7 @@ use serde_json;
 
 use crate::model::{chat::Chat, message::Message, user::User, user_device::UserDevice};
 
-use std::str;
+use std::{cmp::Ordering, collections::BinaryHeap, str};
 
 pub struct DBLayer {
     db: DB,
@@ -134,6 +134,93 @@ impl DBLayer {
 
         collected.reverse();
         Ok(collected)
+    }
+
+    /// Collect the latest raw messages across all chats, ordered by timestamp desc.
+    pub async fn list_recent_messages(&self, limit: usize) -> Result<Vec<Message>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+
+        #[derive(Copy, Clone, Eq, PartialEq)]
+        struct HeapKey {
+            ts: i64,
+            seq: usize,
+        }
+
+        impl Ord for HeapKey {
+            fn cmp(&self, other: &Self) -> Ordering {
+                self.ts.cmp(&other.ts).then(self.seq.cmp(&other.seq))
+            }
+        }
+
+        impl PartialOrd for HeapKey {
+            fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+                Some(self.cmp(other))
+            }
+        }
+
+        struct HeapEntry {
+            key: HeapKey,
+            message: Message,
+        }
+
+        impl PartialEq for HeapEntry {
+            fn eq(&self, other: &Self) -> bool {
+                self.key == other.key
+            }
+        }
+
+        impl Eq for HeapEntry {}
+
+        impl Ord for HeapEntry {
+            fn cmp(&self, other: &Self) -> Ordering {
+                // Reverse so BinaryHeap pops the oldest (smallest ts) first.
+                other.key.cmp(&self.key)
+            }
+        }
+
+        impl PartialOrd for HeapEntry {
+            fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+                Some(self.cmp(other))
+            }
+        }
+
+        let mut heap = BinaryHeap::new();
+        let mut seq = 0usize;
+
+        for item in self.db.iterator(IteratorMode::Start) {
+            let (key, val) = item?;
+            let key_str = str::from_utf8(&key)?;
+            if !key_str.starts_with("chat:") || !key_str.contains(":msg:") {
+                continue;
+            }
+
+            let msg: Message = serde_json::from_slice(&val)?;
+            seq = seq.wrapping_add(1);
+            let entry = HeapEntry {
+                key: HeapKey { ts: msg.ts, seq },
+                message: msg,
+            };
+
+            if heap.len() < limit {
+                heap.push(entry);
+                continue;
+            }
+
+            if heap
+                .peek()
+                .map(|oldest| entry.key > oldest.key)
+                .unwrap_or(false)
+            {
+                heap.pop();
+                heap.push(entry);
+            }
+        }
+
+        let mut messages: Vec<_> = heap.into_iter().map(|entry| entry.message).collect();
+        messages.sort_by(|a, b| b.ts.cmp(&a.ts).then_with(|| a.id.cmp(&b.id)));
+        Ok(messages)
     }
 
     // ============================================================

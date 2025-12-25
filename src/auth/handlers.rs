@@ -3,8 +3,8 @@ use serde_json::Value;
 
 use crate::{
     auth::{types::*, google::verify_google_id_token, jwt::create_jwt},
+    model::user::{User, UserRole},
     ws::AppState,
-    model::user::User,
 };
 use std::sync::Arc;
 
@@ -33,6 +33,7 @@ pub async fn google_login(
         meta: None,
         email: None,
         password_hash: None,
+        role: UserRole::Free,
     });
 
     if let Some(n) = name { user.name = Some(n); }

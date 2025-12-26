@@ -193,6 +193,9 @@ async fn upsert_google_user(db: &DBLayer, claims: &GoogleClaims) -> anyhow::Resu
             "auth_methods": [provider_id],
         })),
         password_hash: None,
+        api_key: None,
+        api_secret: None,
+        generation_count: 0,
         role: UserRole::Free,
     };
 

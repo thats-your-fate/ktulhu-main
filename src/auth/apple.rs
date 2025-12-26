@@ -247,6 +247,9 @@ pub async fn upsert_apple_user(db: &DBLayer, claims: &AppleIdClaims) -> anyhow::
             "auth_methods": [provider_id],
         })),
         password_hash: None,
+        api_key: None,
+        api_secret: None,
+        generation_count: 0,
         role: UserRole::Free,
     };
 

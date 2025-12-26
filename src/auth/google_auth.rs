@@ -79,6 +79,9 @@ pub async fn google_auth_handler(
             created_ts: Utc::now().timestamp(),
             meta: None,
             password_hash: None,
+            api_key: None,
+            api_secret: None,
+            generation_count: 0,
             role: UserRole::Free,
         };
         state

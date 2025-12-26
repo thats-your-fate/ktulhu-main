@@ -33,6 +33,9 @@ pub async fn google_login(
         meta: None,
         email: None,
         password_hash: None,
+        api_key: None,
+        api_secret: None,
+        generation_count: 0,
         role: UserRole::Free,
     });
 

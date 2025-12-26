@@ -6,9 +6,10 @@ use axum::{
 
 pub mod handlers;
 use handlers::{
-    admin_latest_messages, admin_overview, admin_page, delete_message, delete_thread, get_thread,
-    list_chats_by_device, list_chats_by_user, list_messages_by_device, list_messages_for_chat,
-    set_message_liked, update_summary,
+    admin_latest_messages, admin_list_users, admin_overview, admin_page, admin_update_user_role,
+    admin_users_page, delete_message, delete_thread, get_thread, list_chats_by_device,
+    list_chats_by_user, list_messages_by_device, list_messages_for_chat, set_message_liked,
+    update_summary,
 };
 
 pub fn router() -> Router<AppState> {
@@ -45,4 +46,10 @@ pub fn router() -> Router<AppState> {
         .route("/internal/admin", get(admin_page))
         .route("/internal/admin/overview", get(admin_overview))
         .route("/internal/admin/last", get(admin_latest_messages))
+        .route("/internal/users", get(admin_users_page))
+        .route("/internal/users/list", get(admin_list_users))
+        .route(
+            "/internal/users/{user_id}/role",
+            axum::routing::put(admin_update_user_role),
+        )
 }

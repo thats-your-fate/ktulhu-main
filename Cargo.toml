@@ -15,6 +15,7 @@ candle-core = { version = "0.9.1", features = ["cuda"] }
 candle-nn = { version = "0.9.1", features = ["cuda"] }
 candle-transformers = { version = "0.9.1", features = ["cuda"] }
 axum = { version = "0.8", features = ["ws", "multipart"] }
+axum-extra = { version = "0.12", features = ["typed-header"] }
 axum-core = "0.4.3"
 headers = "0.4"
 once_cell = "1"

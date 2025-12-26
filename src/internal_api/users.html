@@ -1,0 +1,271 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>User Management · Ktulhu Admin</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+        :root {
+            font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+            background: #05060a;
+            color: #f4f5fb;
+        }
+        body {
+            margin: 0;
+            padding: 24px;
+        }
+        header {
+            display: flex;
+            flex-wrap: wrap;
+            justify-content: space-between;
+            gap: 16px;
+            margin-bottom: 24px;
+        }
+        h1 {
+            margin: 0;
+            font-size: 1.6rem;
+        }
+        a.button,
+        button,
+        select {
+            background: #191a2d;
+            border: 1px solid #2d2f46;
+            color: inherit;
+            padding: 8px 14px;
+            border-radius: 6px;
+            cursor: pointer;
+            text-decoration: none;
+            font-size: 0.95rem;
+        }
+        a.button:hover,
+        button:hover {
+            border-color: #6366f1;
+            color: #c7d2fe;
+        }
+        .instructions {
+            background: #0f1020;
+            border: 1px solid #1b1c32;
+            border-radius: 10px;
+            padding: 16px;
+            margin-bottom: 24px;
+            line-height: 1.6;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            border: 1px solid #1b1c32;
+            background: #0e0f1a;
+            border-radius: 10px;
+            overflow: hidden;
+        }
+        th, td {
+            padding: 10px 12px;
+            border-bottom: 1px solid #1b1c32;
+            text-align: left;
+            white-space: nowrap;
+        }
+        th {
+            background: #14152a;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            font-size: 0.75rem;
+            color: #9aa0d1;
+        }
+        td {
+            white-space: normal;
+        }
+        tr:hover {
+            background: #161735;
+        }
+        .role-select {
+            width: 120px;
+        }
+        .status-pill {
+            padding: 2px 8px;
+            border-radius: 999px;
+            font-size: 0.75rem;
+        }
+        .status-allowed {
+            background: rgba(16, 185, 129, 0.15);
+            color: #6ee7b7;
+        }
+        .status-blocked {
+            background: rgba(248, 113, 113, 0.15);
+            color: #fecaca;
+        }
+        caption {
+            text-align: left;
+            padding: 8px 0 12px;
+            font-weight: 600;
+            color: #9ea4de;
+        }
+        #status-banner {
+            margin-bottom: 16px;
+            font-size: 0.9rem;
+            min-height: 1.4em;
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <div>
+            <h1>User Management</h1>
+            <p style="margin:6px 0 0 0;color:#9aa0d1;">Manage roles and generation access for all accounts.</p>
+        </div>
+        <div style="display:flex;gap:10px;align-items:center;">
+            <a class="button" href="/internal/admin">← Back to Admin Overview</a>
+            <button id="refresh-users">Refresh list</button>
+        </div>
+    </header>
+
+    <section class="instructions">
+        <strong>How this view works:</strong>
+        <ol style="margin:8px 0 0 18px;padding:0;">
+            <li>The table below calls <code>GET /internal/users/list</code> to fetch every stored user.</li>
+            <li>Changing the dropdown sends <code>PUT /internal/users/&lt;user_id&gt;/role</code> with a JSON body like <code>{"role":"paid"}</code>.</li>
+            <li>The backend persists the new role with <code>DBLayer::save_user</code>; generation availability now depends on role + usage (Free users get 10 completions, Paid/Admin are unlimited).</li>
+            <li>Use the “Refresh list” button (or reload) after bulk edits to confirm the latest status.</li>
+        </ol>
+        <p style="margin:14px 0 0 0;">
+            <strong>Frontend counter integration:</strong>
+            Call <code>GET /external/api/profile</code> (or <code>/external/api/usage</code>) after authenticating via Bearer token. Both responses now include
+            <code>generation_count</code>, <code>generation_limit</code>, and <code>generations_remaining</code>. Use these fields to render progress bars or “X of Y generations used”.
+            Free users get <code>generation_limit = 10</code>; paid/admin users receive <code>null</code> (treat as ∞). Refresh the counter after every successful call to
+            <code>POST /external/api/generate</code>, which returns the updated counts in its payload.
+        </p>
+        <p style="margin:12px 0 0 0;">Tip: wire your production frontend to these same endpoints for an authenticated admin experience, or copy the fetch helpers from this page.</p>
+    </section>
+
+    <div id="status-banner"></div>
+
+    <table>
+        <caption>Users</caption>
+        <thead>
+            <tr>
+                <th>User ID</th>
+                <th>Email</th>
+                <th>Role</th>
+                <th>Generation Access</th>
+                <th>Usage (used/limit)</th>
+                <th>Remaining</th>
+                <th>Created</th>
+            </tr>
+        </thead>
+        <tbody id="users-tbody">
+            <tr><td colspan="6">Loading…</td></tr>
+        </tbody>
+    </table>
+
+    <script>
+        const tbody = document.getElementById('users-tbody');
+        const refreshBtn = document.getElementById('refresh-users');
+        const banner = document.getElementById('status-banner');
+        const ROLE_OPTIONS = ['free', 'paid', 'admin'];
+
+        refreshBtn.addEventListener('click', loadUsers);
+        loadUsers();
+
+        async function loadUsers() {
+            tbody.innerHTML = '<tr><td colspan="6">Loading…</td></tr>';
+            try {
+                const res = await fetch('/internal/users/list');
+                if (!res.ok) throw new Error('Failed to load users');
+                const data = await res.json();
+                renderUserRows(data.users || []);
+                setBanner('');
+            } catch (err) {
+                console.error(err);
+                tbody.innerHTML = '<tr><td colspan="6">Unable to load users</td></tr>';
+                setBanner('Could not load users — check the server logs.');
+            }
+        }
+
+        function renderUserRows(users) {
+            if (!users.length) {
+                tbody.innerHTML = '<tr><td colspan="6">No users stored yet.</td></tr>';
+                return;
+            }
+            tbody.innerHTML = '';
+            users.forEach(user => {
+                const tr = document.createElement('tr');
+                tr.innerHTML = `
+                    <td>${user.id}</td>
+                    <td>${user.email ?? '—'}</td>
+                    <td></td>
+                    <td>${renderAccessPill(user.can_generate)}</td>
+                    <td>${formatUsage(user.generation_count, user.generation_limit)}</td>
+                    <td>${formatRemaining(user.generations_remaining)}</td>
+                    <td>${new Date(user.created_ts * 1000).toLocaleString()}</td>
+                `;
+
+                const roleCell = tr.children[2];
+                roleCell.appendChild(createRoleSelect(user.id, (user.role || 'free')));
+
+                tbody.appendChild(tr);
+            });
+        }
+
+        function renderAccessPill(canGenerate) {
+            const cls = canGenerate ? 'status-allowed' : 'status-blocked';
+            const label = canGenerate ? 'Enabled' : 'Blocked';
+            return `<span class="status-pill ${cls}">${label}</span>`;
+        }
+
+        function formatUsage(count, limit) {
+            const used = count ?? 0;
+            const limitLabel = limit == null ? '∞' : limit;
+            return `${used} / ${limitLabel}`;
+        }
+
+        function formatRemaining(remaining) {
+            if (remaining == null) return '∞';
+            return `${remaining}`;
+        }
+
+        function createRoleSelect(userId, currentRole) {
+            const select = document.createElement('select');
+            select.className = 'role-select';
+            ROLE_OPTIONS.forEach(role => {
+                const option = document.createElement('option');
+                option.value = role;
+                option.textContent = role.charAt(0).toUpperCase() + role.slice(1);
+                if (role === currentRole) option.selected = true;
+                select.appendChild(option);
+            });
+
+            select.addEventListener('change', async () => {
+                const value = select.value;
+                select.disabled = true;
+                try {
+                    await updateUserRole(userId, value);
+                    setBanner(`Updated ${userId} → ${value.toUpperCase()}`);
+                    await loadUsers();
+                } catch (err) {
+                    console.error(err);
+                    setBanner('Failed to update role — see console for details.');
+                } finally {
+                    select.disabled = false;
+                }
+            });
+
+            return select;
+        }
+
+        async function updateUserRole(userId, role) {
+            const res = await fetch(`/internal/users/${userId}/role`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ role })
+            });
+            if (!res.ok) {
+                const text = await res.text();
+                throw new Error(`Update failed: ${text}`);
+            }
+        }
+
+        function setBanner(message) {
+            banner.textContent = message;
+        }
+    </script>
+</body>
+</html>

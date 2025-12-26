@@ -1,14 +1,16 @@
+use crate::inference::byte_decoder::{
+    decode_byte_fallback, normalize_token_text, ByteStreamDecoder,
+};
 use anyhow::{anyhow, Result};
 use candle_core::{DType, Device, IndexOp, Tensor};
 use candle_nn::VarBuilder;
 use candle_transformers::generation::LogitsProcessor;
 use candle_transformers::models::mistral::{Config as MistralConfig, Model as Mistral};
-use tokenizers::Tokenizer;
-use tracing::info;
-
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::{fs, path::PathBuf, sync::Arc};
+use tokenizers::Tokenizer;
 use tokio::sync::{mpsc, Mutex};
+use tracing::info;
 
 use crate::conversation::{trim_partial_chatml, STOP_SEQS};
 
@@ -42,9 +44,10 @@ impl MistralService {
                 .encode("😊", false)
                 .map_err(|e| anyhow!("Tokenizer emoji encode error: {e}"))?;
             let ids = emoji_encoding.get_ids().to_vec();
-            let decoded = tokenizer
+            let decoded_raw = tokenizer
                 .decode(ids.as_slice(), false)
                 .map_err(|e| anyhow!("Tokenizer emoji decode error: {e}"))?;
+            let decoded = decode_byte_fallback(&decoded_raw);
             assert!(
                 !decoded.contains('\u{FFFD}'),
                 "Tokenizer still emits replacement character!"
@@ -155,6 +158,7 @@ pub async fn run_mistral_stream(
     let mut generated_tokens: Vec<u32> = Vec::new();
     let mut emitted_len = 0usize;
     let mut boundary_fixer = BoundaryFixer::default();
+    let mut utf8_decoder = ByteStreamDecoder::new();
 
     const MAX_NEW_TOKENS: usize = 4096;
 
@@ -189,21 +193,18 @@ pub async fn run_mistral_stream(
 
         generated_tokens.push(next_id);
 
-        let decoded = match tokenizer.decode(&generated_tokens, false) {
+        let decoded_raw = match tokenizer.decode(&generated_tokens, false) {
             Ok(s) => s,
             Err(_) => continue,
         };
 
-        let mut normalized = decoded.replace('\u{2581}', " ");
-        normalized = normalized.replace('\u{200b}', "");
-
-        if normalized.contains('\u{FFFD}') {
+        if decoded_raw.contains('\u{FFFD}') {
             continue;
         }
 
-        let pending_suffix = longest_stop_prefix_suffix(&normalized);
-        let safe_end = normalized.len().saturating_sub(pending_suffix);
-        let candidate = &normalized[..safe_end];
+        let pending_suffix = longest_stop_prefix_suffix(&decoded_raw);
+        let safe_end = decoded_raw.len().saturating_sub(pending_suffix);
+        let candidate = &decoded_raw[..safe_end];
         let cleaned = trim_partial_chatml(candidate).to_string();
         let stop_hit = cleaned.len() < candidate.len();
 
@@ -218,11 +219,13 @@ pub async fn run_mistral_stream(
                     return Ok(());
                 }
 
-                let formatted = boundary_fixer.apply(delta);
-                if !formatted.is_empty() {
-                    tx.send(formatted)
-                        .await
-                        .map_err(|e| anyhow!("stream send error: {e}"))?;
+                if let Some(decoded_chunk) = utf8_decoder.push(delta) {
+                    let formatted = boundary_fixer.apply(&decoded_chunk);
+                    if !formatted.is_empty() {
+                        tx.send(formatted)
+                            .await
+                            .map_err(|e| anyhow!("stream send error: {e}"))?;
+                    }
                 }
             }
             emitted_len = cleaned.len();
@@ -233,6 +236,17 @@ pub async fn run_mistral_stream(
         }
 
         tokio::task::yield_now().await;
+    }
+
+    if let Some(decoded_chunk) = utf8_decoder.flush() {
+        if !decoded_chunk.is_empty() && !cancel.load(Ordering::SeqCst) && !tx.is_closed() {
+            let formatted = boundary_fixer.apply(&decoded_chunk);
+            if !formatted.is_empty() {
+                tx.send(formatted)
+                    .await
+                    .map_err(|e| anyhow!("stream send error: {e}"))?;
+            }
+        }
     }
 
     Ok(())
@@ -264,6 +278,7 @@ async fn run_mistral_completion(
     let mut pos = 0usize;
     let mut lp = LogitsProcessor::new(seed(), Some(0.7), None);
     let mut output = String::new();
+    let mut utf8_decoder = ByteStreamDecoder::new();
 
     const MAX_NEW_TOKENS: usize = 4096;
 
@@ -296,19 +311,17 @@ async fn run_mistral_completion(
             break;
         }
 
-        let mut piece = match tokenizer.decode(&[next_id], false) {
+        let decoded_raw = match tokenizer.decode(&[next_id], false) {
             Ok(s) => s,
             Err(_) => continue,
         };
 
-        if piece.contains('\u{2581}') {
-            piece = piece.replace('\u{2581}', " ");
+        if let Some(piece) = utf8_decoder.push(&decoded_raw) {
+            if piece.is_empty() {
+                continue;
+            }
+            output.push_str(&piece);
         }
-        if piece.is_empty() || piece == "\u{200b}" {
-            continue;
-        }
-
-        output.push_str(&piece);
 
         if STOP_SEQS.iter().any(|seq| output.contains(seq)) {
             break;
@@ -317,7 +330,12 @@ async fn run_mistral_completion(
         tokio::task::yield_now().await;
     }
 
+    if let Some(remaining) = utf8_decoder.flush() {
+        output.push_str(&remaining);
+    }
+
     let trimmed = trim_partial_chatml(&output).to_string();
+    let trimmed = normalize_token_text(&trimmed);
     let mut fixer = BoundaryFixer::default();
     Ok(fixer.apply(&trimmed))
 }

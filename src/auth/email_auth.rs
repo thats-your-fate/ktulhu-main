@@ -45,6 +45,9 @@ pub async fn email_register_handler(
             "auth_methods": ["email"]
         })),
         password_hash: Some(hash),
+        api_key: None,
+        api_secret: None,
+        generation_count: 0,
         role: UserRole::Free,
     };
 

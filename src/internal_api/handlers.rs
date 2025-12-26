@@ -1,7 +1,15 @@
-use crate::{model::chat::Chat, model::message::Message, ws::AppState};
+use crate::{
+    model::{
+        chat::Chat,
+        message::Message,
+        user::UserRole,
+    },
+    ws::AppState,
+};
 
 use axum::{
     extract::{Path, Query, State},
+    http::StatusCode,
     response::Html,
     Json,
 };
@@ -47,6 +55,11 @@ pub struct SummaryUpdatePayload {
 #[derive(Debug, Deserialize)]
 pub struct MessageLikePayload {
     pub liked: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateUserRolePayload {
+    pub role: UserRole,
 }
 
 #[derive(Debug, Deserialize)]
@@ -348,6 +361,66 @@ pub async fn admin_latest_messages(
 
 pub async fn admin_page() -> Html<&'static str> {
     Html(include_str!("admin.html"))
+}
+
+pub async fn admin_users_page() -> Html<&'static str> {
+    Html(include_str!("users.html"))
+}
+
+pub async fn admin_list_users(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let mut users = state.db.list_users().await.unwrap_or_default();
+    users.sort_by_key(|u| Reverse(u.created_ts));
+
+    let rows: Vec<serde_json::Value> = users
+        .into_iter()
+        .map(|user| {
+            json!({
+                "id": user.id,
+                "name": user.name,
+                "email": user.email,
+                "role": user.role,
+                "generation_count": user.generation_count,
+                "generation_limit": user.generation_limit(),
+                "generations_remaining": user.generations_remaining(),
+                "created_ts": user.created_ts,
+                "can_generate": user.can_generate_now()
+            })
+        })
+        .collect();
+
+    Json(json!({
+        "count": rows.len(),
+        "users": rows
+    }))
+}
+
+pub async fn admin_update_user_role(
+    Path(user_id): Path<String>,
+    State(state): State<AppState>,
+    Json(payload): Json<UpdateUserRolePayload>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let mut user = state
+        .db
+        .load_user(&user_id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or((StatusCode::NOT_FOUND, "user_not_found".to_string()))?;
+
+    user.role = payload.role;
+    state
+        .db
+        .save_user(&user)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(json!({
+        "user_id": user.id,
+        "role": user.role,
+        "can_generate": user.can_generate_now(),
+        "generation_count": user.generation_count,
+        "generation_limit": user.generation_limit(),
+        "generations_remaining": user.generations_remaining()
+    })))
 }
 
 pub async fn admin_overview(State(state): State<AppState>) -> Json<AdminOverview> {

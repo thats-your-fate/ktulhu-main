@@ -8,7 +8,10 @@ use uuid::Uuid;
 
 use crate::conversation::{strip_chatml_markers, trim_partial_chatml};
 use crate::db::DBLayer;
-use crate::inference::InferenceService;
+use crate::inference::{
+    byte_decoder::{normalize_token_text, ByteStreamDecoder},
+    InferenceService,
+};
 use crate::model::message::Message;
 
 use super::handler::touch_chat;
@@ -121,24 +124,11 @@ async fn process_job(job: InferenceJob) {
 
     let mut assistant_reply = String::new();
     let mut tail = String::new();
+    let mut utf8_decoder = ByteStreamDecoder::new();
 
     while let Some(token) = stream.recv().await {
         if is_warmup {
             break; // first token is enough
-        }
-
-        tail.push_str(&token);
-        if tail.len() > 64 {
-            tail = tail[tail.len() - 64..].to_string();
-        }
-
-        if tail.contains("<|im_end|>") || tail.contains("<|im_start|>") {
-            info!(
-                chat_id = job.chat_id.as_str(),
-                session_id = job.session_id.as_str(),
-                "stop sequence detected in stream"
-            );
-            break;
         }
 
         if token.contains('\u{FFFD}') {
@@ -150,38 +140,59 @@ async fn process_job(job: InferenceJob) {
             );
         }
 
-        assistant_reply.push_str(&token);
+        if let Some(decoded_chunk) = utf8_decoder.push(&token) {
+            tail.push_str(&decoded_chunk);
+            if tail.len() > 64 {
+                tail = tail[tail.len() - 64..].to_string();
+            }
 
-        let msg = serde_json::json!({
-            "type": "assistant",
-            "token": token
-        });
+            if tail.contains("<|im_end|>") || tail.contains("<|im_start|>") {
+                info!(
+                    chat_id = job.chat_id.as_str(),
+                    session_id = job.session_id.as_str(),
+                    "stop sequence detected in stream"
+                );
+                break;
+            }
 
-        if job.cancel.load(Ordering::SeqCst) {
-            break;
+            assistant_reply.push_str(&decoded_chunk);
+
+            let msg = serde_json::json!({
+                "type": "assistant",
+                "token": decoded_chunk
+            });
+
+            if job.cancel.load(Ordering::SeqCst) {
+                break;
+            }
+
+            if job.sender.is_closed() {
+                break;
+            }
+
+            if job
+                .sender
+                .send(WsMessage::Text(msg.to_string().into()))
+                .await
+                .is_err()
+            {
+                break;
+            }
+
+            tail.clear();
         }
-
-        if job.sender.is_closed() {
-            break;
-        }
-
-        if job
-            .sender
-            .send(WsMessage::Text(msg.to_string().into()))
-            .await
-            .is_err()
-        {
-            break;
-        }
-
-        tail.clear();
     }
 
     if is_warmup {
         return;
     }
 
+    if let Some(remaining) = utf8_decoder.flush() {
+        assistant_reply.push_str(&remaining);
+    }
+
     let final_response = trim_partial_chatml(&strip_chatml_markers(&assistant_reply)).to_string();
+    let final_response = normalize_token_text(&final_response);
 
     let assistant_msg = Message {
         id: Uuid::new_v4().to_string(),

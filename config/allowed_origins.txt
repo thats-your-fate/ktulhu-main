@@ -1,0 +1,8 @@
+# List of allowed CORS origins for the HTTP API.
+# Edit this file and restart the server to update the whitelist.
+
+https://ktulhu.com
+https://dev.ktulhu.com
+https://app.ktulhu.com
+https://devfrontend.ktulhu.com
+http://localhost:5173

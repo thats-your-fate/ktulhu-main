@@ -19,6 +19,7 @@ use crate::inference::InferenceService;
 use crate::manager::ModelManager;
 use crate::model::chat::Chat;
 use crate::model::message::{Message, MessageAttachment};
+use crate::payment::PaymentService;
 use crate::reasoning::{run_reasoning, ReasoningProfile, ReasoningResult};
 use crate::ws::inference_worker::{InferenceJob, InferenceWorker};
 use anyhow::anyhow;
@@ -36,6 +37,7 @@ pub struct AppState {
     pub jwt_secret: String,
     pub google_client_id: String,
     pub apple_client_id: String,
+    pub payment: Option<PaymentService>,
 }
 
 #[derive(Deserialize, Debug)]

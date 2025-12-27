@@ -46,6 +46,10 @@ pub struct User {
     pub generation_count: u64,
     #[serde(default)]
     pub role: UserRole,
+    #[serde(default)]
+    pub stripe_customer_id: Option<String>,
+    #[serde(default)]
+    pub stripe_subscription_id: Option<String>,
 }
 
 impl User {

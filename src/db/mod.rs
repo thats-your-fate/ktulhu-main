@@ -459,6 +459,24 @@ impl DBLayer {
         Ok(out)
     }
 
+    pub async fn delete_user(&self, user_id: &str) -> Result<()> {
+        let user_key = format!("user:{user_id}");
+        self.db.delete(user_key)?;
+
+        if let Ok(devices) = self.list_devices_for_user(user_id).await {
+            for device in devices {
+                let key = Self::user_device_key(&device.user_id, &device.id);
+                self.db.delete(key)?;
+                if !device.device_hash.is_empty() {
+                    let lookup_key = Self::device_lookup_key(&device.device_hash);
+                    self.db.delete(lookup_key)?;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     pub async fn list_all_devices(&self) -> Result<Vec<UserDevice>> {
         let prefix = "user_device:";
         let mut out = Vec::new();

@@ -251,6 +251,8 @@ pub async fn upsert_apple_user(db: &DBLayer, claims: &AppleIdClaims) -> anyhow::
         api_secret: None,
         generation_count: 0,
         role: UserRole::Free,
+        stripe_customer_id: None,
+        stripe_subscription_id: None,
     };
 
     db.save_user(&user).await?;

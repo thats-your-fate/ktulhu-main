@@ -1,8 +1,11 @@
-use std::sync::Arc;
+use std::{fs, sync::Arc};
 
-use axum::Router;
+use axum::{
+    http::{header::AUTHORIZATION, header::CONTENT_TYPE, HeaderValue, Method},
+    Router,
+};
 use tokio::net::TcpListener;
-use tower_http::cors::{Any, CorsLayer};
+use tower_http::cors::{AllowHeaders, AllowMethods, AllowOrigin, CorsLayer};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 use dotenvy::dotenv;
@@ -17,6 +20,7 @@ mod inference;
 mod internal_api;
 mod manager;
 mod model;
+mod payment;
 mod prompts;
 mod reasoning;
 mod ws;
@@ -31,6 +35,7 @@ async fn main() -> anyhow::Result<()> {
     // Load .env before anything else
     // -----------------------------------
     dotenv().ok();
+    dotenvy::from_filename("config/payment.env").ok();
 
     // -----------------------------------
     // Logging
@@ -80,6 +85,16 @@ async fn main() -> anyhow::Result<()> {
     ));
 
     // -----------------------------------
+    // Optional payment service (Stripe)
+    // -----------------------------------
+    let payment_service = payment::PaymentService::from_env();
+    if payment_service.is_some() {
+        println!("💳 Stripe checkout enabled via /payment/create-checkout-session");
+    } else {
+        println!("⚠️  Stripe env vars missing — payment routes disabled");
+    }
+
+    // -----------------------------------
     // WebSocket inference worker
     // -----------------------------------
     let worker = InferenceWorker::new(16);
@@ -112,22 +127,38 @@ async fn main() -> anyhow::Result<()> {
         jwt_secret,
         google_client_id,
         apple_client_id,
+        payment: payment_service,
     };
 
     // -----------------------------------
     // Routers
     // -----------------------------------
+    let allowed_origins = load_allowed_origins("config/allowed_origins.txt");
+    let allowed_origin_log = allowed_origins
+        .iter()
+        .filter_map(|v| v.to_str().ok().map(|s| s.to_string()))
+        .collect::<Vec<_>>();
+    println!("🌐 CORS allowed origins: {:?}", allowed_origin_log);
+
+    let cors_layer = CorsLayer::new()
+        .allow_origin(AllowOrigin::list(allowed_origins.clone()))
+        .allow_methods(AllowMethods::list([
+            Method::GET,
+            Method::POST,
+            Method::PUT,
+            Method::DELETE,
+            Method::OPTIONS,
+        ]))
+        .allow_headers(AllowHeaders::list([CONTENT_TYPE, AUTHORIZATION]))
+        .allow_credentials(true);
+
     let app = Router::new()
         .merge(ws::ws_router())
         .merge(auth::router())
         .merge(internal_api::router())
         .merge(external_api::router())
-        .layer(
-            CorsLayer::new()
-                .allow_origin(Any)
-                .allow_headers(Any)
-                .allow_methods(Any),
-        )
+        .merge(payment::router())
+        .layer(cors_layer)
         .with_state(state);
 
     // -----------------------------------
@@ -147,4 +178,46 @@ async fn main() -> anyhow::Result<()> {
     axum::serve(listener, app.into_make_service()).await?;
 
     Ok(())
+}
+
+fn load_allowed_origins(path: &str) -> Vec<HeaderValue> {
+    let default = default_allowed_origin_strings()
+        .into_iter()
+        .filter_map(to_header_value)
+        .collect::<Vec<_>>();
+
+    match fs::read_to_string(path) {
+        Ok(contents) => {
+            let mut origins = Vec::new();
+            for line in contents.lines() {
+                let trimmed = line.trim();
+                if trimmed.is_empty() || trimmed.starts_with('#') {
+                    continue;
+                }
+                if let Some(value) = to_header_value(trimmed.to_string()) {
+                    origins.push(value);
+                }
+            }
+            if origins.is_empty() {
+                default
+            } else {
+                origins
+            }
+        }
+        Err(_) => default,
+    }
+}
+
+fn default_allowed_origin_strings() -> Vec<String> {
+    vec![
+        "https://ktulhu.com".to_string(),
+        "https://dev.ktulhu.com".to_string(),
+        "https://app.ktulhu.com".to_string(),
+        "https://devfrontend.ktulhu.com".to_string(),
+        "http://localhost:5173".to_string(),
+    ]
+}
+
+fn to_header_value(origin: String) -> Option<HeaderValue> {
+    HeaderValue::from_str(&origin).ok()
 }

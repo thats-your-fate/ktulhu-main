@@ -49,6 +49,8 @@ pub async fn email_register_handler(
         api_secret: None,
         generation_count: 0,
         role: UserRole::Free,
+        stripe_customer_id: None,
+        stripe_subscription_id: None,
     };
 
     state

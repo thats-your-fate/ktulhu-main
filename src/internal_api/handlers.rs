@@ -1,9 +1,5 @@
 use crate::{
-    model::{
-        chat::Chat,
-        message::Message,
-        user::UserRole,
-    },
+    model::{chat::Chat, message::Message, user::UserRole},
     ws::AppState,
 };
 
@@ -383,7 +379,9 @@ pub async fn admin_list_users(State(state): State<AppState>) -> Json<serde_json:
                 "generation_limit": user.generation_limit(),
                 "generations_remaining": user.generations_remaining(),
                 "created_ts": user.created_ts,
-                "can_generate": user.can_generate_now()
+                "can_generate": user.can_generate_now(),
+                "stripe_customer_id": user.stripe_customer_id,
+                "stripe_subscription_id": user.stripe_subscription_id,
             })
         })
         .collect();
@@ -420,6 +418,22 @@ pub async fn admin_update_user_role(
         "generation_count": user.generation_count,
         "generation_limit": user.generation_limit(),
         "generations_remaining": user.generations_remaining()
+    })))
+}
+
+pub async fn admin_delete_user(
+    Path(user_id): Path<String>,
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    state
+        .db
+        .delete_user(&user_id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(json!({
+        "user_id": user_id,
+        "deleted": true
     })))
 }
 

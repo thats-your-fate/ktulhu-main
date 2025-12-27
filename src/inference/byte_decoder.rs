@@ -86,9 +86,8 @@ impl ByteStreamDecoder {
                     return None;
                 }
 
-                let valid = unsafe {
-                    std::str::from_utf8_unchecked(&self.pending_bytes[..valid_up_to])
-                };
+                let valid =
+                    unsafe { std::str::from_utf8_unchecked(&self.pending_bytes[..valid_up_to]) };
                 let text = tidy_decoded_text(valid);
                 self.pending_bytes.drain(0..valid_up_to);
                 if text.is_empty() {
@@ -130,10 +129,7 @@ mod tests {
 
     #[test]
     fn decodes_multiple_emojis() {
-        assert_eq!(
-            normalize_token_text("ðŁĻĤ ðŁĺĬ"),
-            "🙂 😊"
-        );
+        assert_eq!(normalize_token_text("ðŁĻĤ ðŁĺĬ"), "🙂 😊");
     }
 
     #[test]

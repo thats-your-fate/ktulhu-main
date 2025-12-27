@@ -25,18 +25,29 @@
             margin: 0;
             font-size: 1.6rem;
         }
-        a.button,
-        button,
-        select {
-            background: #191a2d;
-            border: 1px solid #2d2f46;
+a.button,
+button,
+select {
+    background: #191a2d;
+    border: 1px solid #2d2f46;
             color: inherit;
             padding: 8px 14px;
             border-radius: 6px;
             cursor: pointer;
             text-decoration: none;
             font-size: 0.95rem;
-        }
+}
+a.button.danger-btn,
+.danger-btn {
+    background: #2b121f;
+    border-color: #f87171;
+    color: #fecaca;
+}
+.danger-btn:hover {
+    background: #3b1525;
+    border-color: #fb7185;
+    color: #fff;
+}
         a.button:hover,
         button:hover {
             border-color: #6366f1;
@@ -145,14 +156,16 @@
                 <th>User ID</th>
                 <th>Email</th>
                 <th>Role</th>
+                <th>Stripe IDs</th>
                 <th>Generation Access</th>
                 <th>Usage (used/limit)</th>
                 <th>Remaining</th>
                 <th>Created</th>
+                <th>Actions</th>
             </tr>
         </thead>
         <tbody id="users-tbody">
-            <tr><td colspan="6">Loading…</td></tr>
+            <tr><td colspan="9">Loading…</td></tr>
         </tbody>
     </table>
 
@@ -166,7 +179,7 @@
         loadUsers();
 
         async function loadUsers() {
-            tbody.innerHTML = '<tr><td colspan="6">Loading…</td></tr>';
+            tbody.innerHTML = '<tr><td colspan="9">Loading…</td></tr>';
             try {
                 const res = await fetch('/internal/users/list');
                 if (!res.ok) throw new Error('Failed to load users');
@@ -175,14 +188,14 @@
                 setBanner('');
             } catch (err) {
                 console.error(err);
-                tbody.innerHTML = '<tr><td colspan="6">Unable to load users</td></tr>';
+                tbody.innerHTML = '<tr><td colspan="9">Unable to load users</td></tr>';
                 setBanner('Could not load users — check the server logs.');
             }
         }
 
         function renderUserRows(users) {
             if (!users.length) {
-                tbody.innerHTML = '<tr><td colspan="6">No users stored yet.</td></tr>';
+                tbody.innerHTML = '<tr><td colspan="9">No users stored yet.</td></tr>';
                 return;
             }
             tbody.innerHTML = '';
@@ -192,14 +205,33 @@
                     <td>${user.id}</td>
                     <td>${user.email ?? '—'}</td>
                     <td></td>
+                    <td>${renderStripeIds(user)}</td>
                     <td>${renderAccessPill(user.can_generate)}</td>
                     <td>${formatUsage(user.generation_count, user.generation_limit)}</td>
                     <td>${formatRemaining(user.generations_remaining)}</td>
                     <td>${new Date(user.created_ts * 1000).toLocaleString()}</td>
+                    <td><button class="danger-btn" data-action="delete">Remove</button></td>
                 `;
 
                 const roleCell = tr.children[2];
                 roleCell.appendChild(createRoleSelect(user.id, (user.role || 'free')));
+                const deleteBtn = tr.querySelector('[data-action="delete"]');
+                deleteBtn.addEventListener('click', async () => {
+                    if (!confirm(`Delete user ${user.id}? This cannot be undone.`)) {
+                        return;
+                    }
+                    deleteBtn.disabled = true;
+                    try {
+                        await deleteUser(user.id);
+                        setBanner(`Deleted ${user.id}`);
+                        await loadUsers();
+                    } catch (err) {
+                        console.error(err);
+                        setBanner('Failed to delete user.');
+                    } finally {
+                        deleteBtn.disabled = false;
+                    }
+                });
 
                 tbody.appendChild(tr);
             });
@@ -209,6 +241,17 @@
             const cls = canGenerate ? 'status-allowed' : 'status-blocked';
             const label = canGenerate ? 'Enabled' : 'Blocked';
             return `<span class="status-pill ${cls}">${label}</span>`;
+        }
+
+        function renderStripeIds(user) {
+            const parts = [];
+            if (user.stripe_customer_id) {
+                parts.push(`Cust: ${user.stripe_customer_id}`);
+            }
+            if (user.stripe_subscription_id) {
+                parts.push(`Sub: ${user.stripe_subscription_id}`);
+            }
+            return parts.length ? parts.join('<br>') : '—';
         }
 
         function formatUsage(count, limit) {
@@ -260,6 +303,16 @@
             if (!res.ok) {
                 const text = await res.text();
                 throw new Error(`Update failed: ${text}`);
+            }
+        }
+
+        async function deleteUser(userId) {
+            const res = await fetch(`/internal/users/${userId}`, {
+                method: 'DELETE',
+            });
+            if (!res.ok) {
+                const text = await res.text();
+                throw new Error(`Delete failed: ${text}`);
             }
         }
 

@@ -7,3 +7,4 @@ storage
 !src/storage
 .env
 ktulhuauth.json
+config/payment.env

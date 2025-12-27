@@ -180,6 +180,7 @@ impl PhiService {
     // -----------------------------------------------------------------
 
     /// Short, neutral summary. Perfect for internal news / doc summaries.
+    #[allow(dead_code)]
     pub async fn summarize(&self, text: &str, max_tokens: usize) -> Result<String> {
         let prompt = format!(
             "Summarize the following text clearly and concisely in a few sentences:\n\n{}",
@@ -194,6 +195,7 @@ impl PhiService {
     }
 
     /// Extract up to N keywords, returns them as Vec<String>.
+    #[allow(dead_code)]
     pub async fn extract_keywords(&self, text: &str, max_keywords: usize) -> Result<Vec<String>> {
         let prompt = format!(
             "Extract up to {} short keywords from the following text, separated by commas:\n\n{}",
@@ -211,6 +213,7 @@ impl PhiService {
     }
 
     /// Classify into one of several labels (e.g. politics, tech, sports).
+    #[allow(dead_code)]
     pub async fn classify_into(&self, text: &str, labels: &[&str]) -> Result<String> {
         let label_list = labels.join(", ");
         let prompt = format!(

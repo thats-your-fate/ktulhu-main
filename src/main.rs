@@ -15,6 +15,7 @@ mod auth;
 mod classifier;
 mod conversation;
 mod db;
+mod embeddings;
 mod external_api;
 mod inference;
 mod internal_api;
@@ -74,6 +75,17 @@ async fn main() -> anyhow::Result<()> {
     // Load ML models
     // -----------------------------------
     let models = Arc::new(ModelManager::new().await?);
+
+    println!("5️⃣ Sanity check (what you asked for)");
+    let test = models
+        .roberta
+        .embed("machine learning is cool")
+        .await?;
+    println!(
+        "🧪 embedding check → dim={} norm={:.4}",
+        test.len(),
+        test.iter().map(|x| x * x).sum::<f32>().sqrt()
+    );
 
     // -----------------------------------
     // Unified inference service

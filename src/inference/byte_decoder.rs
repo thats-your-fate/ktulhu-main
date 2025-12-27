@@ -61,6 +61,7 @@ impl ByteStreamDecoder {
         self.take_ready_text()
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn is_empty(&self) -> bool {
         self.pending_bytes.is_empty()
     }

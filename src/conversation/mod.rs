@@ -1,5 +1,6 @@
 use crate::{attachments::message_attachment_summaries, model::message::Message};
 use serde::{Deserialize, Serialize};
+use tracing::error;
 
 pub const STOP_SEQS: &[&str] = &["<|", "<|im_end|>"];
 
@@ -144,8 +145,35 @@ pub fn trim_partial_chatml(text: &str) -> &str {
         .min()
         .unwrap_or(text.len());
 
+    if end > text.len() {
+        end = text.len();
+    }
+
+    if end > 0 && !text.is_char_boundary(end) {
+        let original_end = end;
+        while end > 0 && !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        error!(
+            original_end,
+            adjusted_end = end,
+            "trim_partial_chatml adjusted to utf8 boundary"
+        );
+    }
+
     if end > 0 && text[..end].ends_with('<') {
-        end -= 1;
+        let mut adjusted = end - 1;
+        while adjusted > 0 && !text.is_char_boundary(adjusted) {
+            adjusted -= 1;
+        }
+        if adjusted != end - 1 {
+            error!(
+                original_end = end,
+                adjusted_end = adjusted,
+                "trim_partial_chatml removed dangling utf8 byte"
+            );
+        }
+        end = adjusted;
     }
 
     &text[..end]

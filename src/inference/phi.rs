@@ -2,6 +2,7 @@ use anyhow::{anyhow, Result};
 use candle_core::{DType, Device, IndexOp, Tensor};
 use candle_nn::VarBuilder;
 use tokenizers::Tokenizer;
+use crate::inference::byte_decoder::tidy_decoded_text;
 
 // ✔️ Candle 0.9.1 Phi-3 model
 use candle_transformers::models::phi3::{Config as Phi3Config, Model as Phi3Model};
@@ -172,7 +173,7 @@ impl PhiService {
             .decode(gen_slice, false)
             .map_err(|e| anyhow!("Phi decode error: {e}"))?;
 
-        Ok(text)
+        Ok(tidy_decoded_text(&text))
     }
 
     // -----------------------------------------------------------------

@@ -1,0 +1,17 @@
+{
+  "layer1": {
+    "task": "Tarea / acción",
+    "chat": "Charla / conversación"
+  },
+  "task_types": {
+    "task_short": "Tarea breve",
+    "task_explain": "Explicar o aconsejar",
+    "task_technical": "Tarea técnica o de código",
+    "regulated_tax_legal": "Tema regulado / legal"
+  },
+  "chat_styles": {
+    "chat_casual": "Charla casual",
+    "chat_greeting": "Saludo",
+    "chat_reaction": "Reacción"
+  }
+}

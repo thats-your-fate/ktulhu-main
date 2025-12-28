@@ -1,0 +1,17 @@
+{
+  "layer1": {
+    "task": "Задача / действие",
+    "chat": "Общение / диалог"
+  },
+  "task_types": {
+    "task_short": "Короткая задача",
+    "task_explain": "Объяснение или совет",
+    "task_technical": "Техническая или кодовая задача",
+    "regulated_tax_legal": "Регулируемая / юридическая тема"
+  },
+  "chat_styles": {
+    "chat_casual": "Неформальный чат",
+    "chat_greeting": "Приветствие",
+    "chat_reaction": "Реакция"
+  }
+}

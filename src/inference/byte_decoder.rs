@@ -113,7 +113,7 @@ fn append_decoded_bytes(target: &mut Vec<u8>, chunk: &str) {
     }
 }
 
-fn tidy_decoded_text(text: &str) -> String {
+pub fn tidy_decoded_text(text: &str) -> String {
     text.replace('\u{0120}', " ")
         .replace('\u{2581}', " ")
         .replace('\u{200b}', "")

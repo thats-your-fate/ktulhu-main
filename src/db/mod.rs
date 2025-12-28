@@ -2,7 +2,10 @@ use anyhow::Result;
 use rocksdb::{Direction, IteratorMode, Options, DB};
 use serde_json;
 
-use crate::model::{chat::Chat, message::Message, user::User, user_device::UserDevice};
+use crate::{
+    inference::byte_decoder::tidy_decoded_text,
+    model::{chat::Chat, message::Message, user::User, user_device::UserDevice},
+};
 
 use std::{cmp::Ordering, collections::BinaryHeap, str};
 
@@ -36,7 +39,8 @@ impl DBLayer {
 
     pub async fn save_message(&self, msg: &Message) -> Result<()> {
         let key = Self::msg_key(&msg.chat_id, msg.ts, &msg.id);
-        let val = serde_json::to_vec(msg)?;
+        let stored = normalize_message(msg.clone());
+        let val = serde_json::to_vec(&stored)?;
         self.db.put(key, val)?;
         Ok(())
     }
@@ -58,7 +62,7 @@ impl DBLayer {
             }
 
             let msg: Message = serde_json::from_slice(&val)?;
-            results.push(msg);
+            results.push(normalize_message(msg));
         }
 
         Ok(results)
@@ -82,7 +86,7 @@ impl DBLayer {
 
             let msg: Message = serde_json::from_slice(&val)?;
             if msg.id == message_id {
-                return Ok(Some((key.to_vec(), msg)));
+                return Ok(Some((key.to_vec(), normalize_message(msg))));
             }
         }
         Ok(None)
@@ -124,7 +128,7 @@ impl DBLayer {
 
             if k.starts_with(&prefix) {
                 let msg: Message = serde_json::from_slice(&val)?;
-                collected.push(msg);
+                collected.push(normalize_message(msg));
 
                 if collected.len() >= n {
                     break;
@@ -197,6 +201,7 @@ impl DBLayer {
             }
 
             let msg: Message = serde_json::from_slice(&val)?;
+            let msg = normalize_message(msg);
             seq = seq.wrapping_add(1);
             let entry = HeapEntry {
                 key: HeapKey { ts: msg.ts, seq },
@@ -416,7 +421,7 @@ impl DBLayer {
             return Ok(None);
         };
 
-        let device_id = String::from_utf8(device_id_bytes.to_vec())?;
+        let device_id = String::from_utf8_lossy(&device_id_bytes).to_string();
 
         // Now we must find the corresponding user
         // → search all user_device:{user_id}:{device_id}
@@ -519,6 +524,25 @@ impl DBLayer {
 
     pub async fn user_id_by_device(&self, device_hash: &str) -> Result<Option<String>> {
         let key = Self::device_lookup_key(device_hash);
-        Ok(self.db.get(key)?.map(|v| String::from_utf8(v).unwrap()))
+        Ok(self
+            .db
+            .get(key)?
+            .map(|v| String::from_utf8_lossy(&v).to_string()))
+    }
+}
+
+fn normalize_message(mut msg: Message) -> Message {
+    normalize_option_text(&mut msg.text);
+    for attachment in msg.attachments.iter_mut() {
+        normalize_option_text(&mut attachment.description);
+        normalize_option_text(&mut attachment.ocr_text);
+    }
+    msg
+}
+
+fn normalize_option_text(target: &mut Option<String>) {
+    if let Some(text) = target.take() {
+        let normalized = tidy_decoded_text(&text);
+        target.replace(normalized);
     }
 }

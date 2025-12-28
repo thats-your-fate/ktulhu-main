@@ -1,26 +1,103 @@
 use anyhow::Result;
+use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 use crate::{manager::ModelManager, prompts};
 use tracing::{info, warn};
 
 const MULTI_INTENT_MIN_LEN: usize = 40;
 const TASK_GATE_THRESHOLD: f32 = 0.55;
+
+const TASK_OR_CHAT_LABELS: &[&str] = &["task", "chat"];
 const TASK_LAYER_LABELS: &[&str] = &[
     "task_short",
     "task_explain",
     "task_technical",
     "regulated_tax_legal",
 ];
-const CHAT_LAYER_LABELS: &[&str] = &[
-    "chat_casual",
-    "chat_greeting",
-    "chat_reaction",
-    "opinion_casual",
-    "opinion_reflective",
-    "culture_context",
-];
-const TASK_OR_CHAT_LABELS: &[&str] = &["task", "chat"];
+const CHAT_STYLE_LABELS: &[&str] = &["chat_casual", "chat_greeting", "chat_reaction"];
+
+#[derive(Deserialize)]
+struct RoutingLabelFile {
+    layer1: HashMap<String, String>,
+    task_types: HashMap<String, String>,
+    chat_styles: HashMap<String, String>,
+}
+
+struct RoutingLabelSet {
+    layer1: HashMap<String, String>,
+    task_types: HashMap<String, String>,
+    chat_styles: HashMap<String, String>,
+}
+
+impl RoutingLabelSet {
+    fn layer1_display(&self, key: &str) -> String {
+        self.layer1
+            .get(key)
+            .cloned()
+            .unwrap_or_else(|| key.to_string())
+    }
+
+    fn task_display(&self, key: &str) -> String {
+        self.task_types
+            .get(key)
+            .cloned()
+            .unwrap_or_else(|| key.to_string())
+    }
+
+    fn chat_display(&self, key: &str) -> String {
+        self.chat_styles
+            .get(key)
+            .cloned()
+            .unwrap_or_else(|| key.to_string())
+    }
+}
+
+macro_rules! routing_labels_file {
+    ($lang:literal) => {
+        include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/lang/",
+            $lang,
+            "/routing_labels.json"
+        ))
+    };
+}
+
+static EN_ROUTING_LABELS: Lazy<RoutingLabelSet> =
+    Lazy::new(|| load_routing_labels(routing_labels_file!("en")));
+static ES_ROUTING_LABELS: Lazy<RoutingLabelSet> =
+    Lazy::new(|| load_routing_labels(routing_labels_file!("es")));
+static RU_ROUTING_LABELS: Lazy<RoutingLabelSet> =
+    Lazy::new(|| load_routing_labels(routing_labels_file!("ru")));
+static PT_ROUTING_LABELS: Lazy<RoutingLabelSet> =
+    Lazy::new(|| load_routing_labels(routing_labels_file!("pt")));
+
+fn load_routing_labels(raw: &str) -> RoutingLabelSet {
+    let parsed: RoutingLabelFile =
+        serde_json::from_str(raw).expect("invalid routing label config");
+    RoutingLabelSet {
+        layer1: parsed.layer1,
+        task_types: parsed.task_types,
+        chat_styles: parsed.chat_styles,
+    }
+}
+
+fn routing_labels(language: Option<&str>) -> &'static RoutingLabelSet {
+    let normalized = language
+        .and_then(|lang| lang.split(|c| c == '-' || c == '_').next())
+        .unwrap_or("en")
+        .to_ascii_lowercase();
+
+    match normalized.as_str() {
+        "es" => &ES_ROUTING_LABELS,
+        "ru" => &RU_ROUTING_LABELS,
+        "pt" => &PT_ROUTING_LABELS,
+        _ => &EN_ROUTING_LABELS,
+    }
+}
+
 
 #[derive(Debug, Clone, Serialize)]
 pub struct IntentRoutingResult {
@@ -198,18 +275,15 @@ fn normalize_language(language: Option<&str>) -> String {
 fn map_task_label(label: &str) -> (&'static str, Option<&'static str>) {
     match label {
         "task_short" => ("task_short", None),
-        "task_explain" => ("advice_practical", Some("mapped explanation → advice intent")),
-        "task_technical" => ("reasoning_logical", Some("mapped technical task → reasoning intent")),
-        "regulated_tax_legal" => ("regulated_tax_legal", Some("mapped regulated intent via layer2")),
-        _ => ("task_short", Some("fallback to task_short")),
+        "task_explain" => ("advice_practical", Some("task_explain → advice_practical")),
+        "task_technical" => ("reasoning_logical", Some("task_technical → reasoning_logical")),
+        "regulated_tax_legal" => ("regulated_tax_legal", None),
+        _ => ("task_short", Some("fallback → task_short")),
     }
 }
 
 fn map_chat_label(label: &str) -> (&'static str, Option<&'static str>) {
     match label {
-        "opinion_reflective" => ("opinion_reflective", None),
-        "opinion_casual" => ("opinion_casual", None),
-        "culture_context" => ("culture_context", None),
         "chat_greeting" => ("chat_casual", Some("greeting collapsed into chat_casual")),
         "chat_reaction" => ("chat_casual", Some("reaction collapsed into chat_casual")),
         _ => ("chat_casual", None),
@@ -223,26 +297,28 @@ pub async fn route_intent(
 ) -> Result<IntentRoutingResult> {
     let trimmed = text.trim();
     let mut result = IntentRoutingResult::default();
+
     let resolved_language = normalize_language(language);
     result.language = resolved_language.clone();
+    let localized_labels = routing_labels(language);
 
     if trimmed.is_empty() {
-        result.notes.push("empty input".to_string());
+        result.notes.push("empty input".into());
         return Ok(result);
     }
 
+    // ------------------------------------------------------------
+    // Multi-intent detection (unchanged)
+    // ------------------------------------------------------------
     let utterances = split_into_utterances(trimmed);
     let multi_intent = utterances
         .iter()
-        .filter(|segment| segment.trim().chars().count() >= MULTI_INTENT_MIN_LEN)
-        .count()
-        > 1;
+        .filter(|u| u.chars().count() >= MULTI_INTENT_MIN_LEN)
+        .count() > 1;
 
     if multi_intent {
         result.multi_intent = true;
-        result
-            .notes
-            .push("multiple significant utterances detected".to_string());
+        result.notes.push("multiple significant utterances detected".into());
         return Ok(result);
     }
 
@@ -252,43 +328,101 @@ pub async fn route_intent(
         .unwrap_or_else(|| trimmed.to_string());
 
     let mut notes = Vec::new();
+
+    // ------------------------------------------------------------
+    // LAYER 1 — TASK vs CHAT (ML-critical)
+    // ------------------------------------------------------------
     let (layer1_label, layer1_conf) = models
         .roberta
         .classify(&classify_input, TASK_OR_CHAT_LABELS)
         .await?;
+
+    let layer1_display = localized_labels.layer1_display(&layer1_label);
+    info!(
+        layer = "task_gate",
+        label = layer1_label.as_str(),
+        label_display = layer1_display.as_str(),
+        confidence = layer1_conf,
+        language = resolved_language.as_str(),
+        "intent routing layer resolved"
+    );
     notes.push(format!(
-        "layer1 task-vs-chat → {} ({:.2})",
-        layer1_label, layer1_conf
+        "layer1 {label} ({conf:.2}) → {display}",
+        label = layer1_label,
+        conf = layer1_conf,
+        display = layer1_display
     ));
 
     let is_task = layer1_label == "task" && layer1_conf >= TASK_GATE_THRESHOLD;
 
+    // ------------------------------------------------------------
+    // LAYER 2 — TASK KIND (only if task)
+    // ------------------------------------------------------------
     let (intent, confidence) = if is_task {
         let (task_label, conf) = models
             .roberta
             .classify(&classify_input, TASK_LAYER_LABELS)
             .await?;
-        notes.push(format!("layer2 task intent → {} ({:.2})", task_label, conf));
-        let (intent, extra_note) = map_task_label(&task_label);
-        if let Some(note) = extra_note {
-            notes.push(note.to_string());
+
+        let display_text = localized_labels.task_display(&task_label);
+        info!(
+            layer = "task_kind",
+            label = task_label.as_str(),
+            label_display = display_text.as_str(),
+            confidence = conf,
+            language = resolved_language.as_str(),
+            "intent routing layer resolved"
+        );
+        notes.push(format!(
+            "layer2 {label} ({conf:.2}) → {display}",
+            label = task_label,
+            conf = conf,
+            display = display_text
+        ));
+
+        let (intent, note) = map_task_label(&task_label);
+        if let Some(n) = note {
+            notes.push(n.to_string());
         }
+
         (intent.to_string(), conf)
     } else {
+        // --------------------------------------------------------
+        // LAYER 3 — CHAT STYLE (lightweight)
+        // --------------------------------------------------------
         let (chat_label, conf) = models
             .roberta
-            .classify(&classify_input, CHAT_LAYER_LABELS)
+            .classify(&classify_input, CHAT_STYLE_LABELS)
             .await?;
-        notes.push(format!("layer3 chat intent → {} ({:.2})", chat_label, conf));
-        let (intent, extra_note) = map_chat_label(&chat_label);
-        if let Some(note) = extra_note {
-            notes.push(note.to_string());
+
+        let display_text = localized_labels.chat_display(&chat_label);
+        info!(
+            layer = "chat_style",
+            label = chat_label.as_str(),
+            label_display = display_text.as_str(),
+            confidence = conf,
+            language = resolved_language.as_str(),
+            "intent routing layer resolved"
+        );
+        notes.push(format!(
+            "layer3 {label} ({conf:.2}) → {display}",
+            label = chat_label,
+            conf = conf,
+            display = display_text
+        ));
+
+        let (intent, note) = map_chat_label(&chat_label);
+        if let Some(n) = note {
+            notes.push(n.to_string());
         }
+
         (intent.to_string(), conf)
     };
 
-    let clarification_needed = false;
-    let detected_profile = select_reasoning_profile(
+    // ------------------------------------------------------------
+    // Reasoning profile (unchanged, downstream concern)
+    // ------------------------------------------------------------
+    let reasoning_profile = select_reasoning_profile(
         models,
         text,
         Some(resolved_language.as_str()),
@@ -296,12 +430,18 @@ pub async fn route_intent(
     )
     .await;
 
+    info!(
+        final_intent = intent.as_str(),
+        confidence = confidence,
+        multi_intent = result.multi_intent,
+        language = resolved_language.as_str(),
+        "intent routing completed"
+    );
+
     result.intent = intent;
     result.confidence = confidence;
-    result.multi_intent = false;
-    result.clarification_needed = clarification_needed;
     result.notes = notes;
-    result.reasoning_profile = Some(detected_profile);
+    result.reasoning_profile = Some(reasoning_profile);
 
     Ok(result)
 }

@@ -1,0 +1,17 @@
+{
+  "layer1": {
+    "task": "Task / action",
+    "chat": "Chat / conversation"
+  },
+  "task_types": {
+    "task_short": "Short task",
+    "task_explain": "Explain or elaborate",
+    "task_technical": "Technical or coding task",
+    "regulated_tax_legal": "Regulated / tax / legal task"
+  },
+  "chat_styles": {
+    "chat_casual": "Casual chat",
+    "chat_greeting": "Greeting",
+    "chat_reaction": "Reaction"
+  }
+}

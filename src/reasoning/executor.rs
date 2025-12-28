@@ -5,6 +5,7 @@ use std::sync::{
 
 use crate::{
     conversation::{sanitize_chatml_text, strip_chatml_markers, trim_partial_chatml},
+    inference::byte_decoder::tidy_decoded_text,
     manager::ModelManager,
 };
 use anyhow::{anyhow, Result};
@@ -31,16 +32,17 @@ pub async fn run_hidden_completion(
         .await?;
 
     let cleaned = strip_chatml_markers(&output);
-    let trimmed = trim_partial_chatml(&cleaned);
-    let preview: String = trimmed.chars().take(200).collect();
+    let trimmed = trim_partial_chatml(&cleaned).to_string();
+    let normalized = tidy_decoded_text(trimmed.trim());
+    let preview: String = normalized.chars().take(200).collect();
     info!(
-        trimmed_len = trimmed.len(),
+        trimmed_len = normalized.len(),
         stop_sequence_applied = (cleaned.len() != trimmed.len()),
         preview = preview,
         "hidden_completion postprocess"
     );
 
-    Ok(trimmed.trim().to_string())
+    Ok(normalized)
 }
 
 pub fn inject_hidden_block(base_prompt: &str, hidden_text: &str) -> String {

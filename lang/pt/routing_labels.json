@@ -1,0 +1,17 @@
+{
+  "layer1": {
+    "task": "Tarefa / ação",
+    "chat": "Conversa"
+  },
+  "task_types": {
+    "task_short": "Tarefa curta",
+    "task_explain": "Explicar ou orientar",
+    "task_technical": "Tarefa técnica ou de código",
+    "regulated_tax_legal": "Questão regulada / legal"
+  },
+  "chat_styles": {
+    "chat_casual": "Conversa casual",
+    "chat_greeting": "Saudação",
+    "chat_reaction": "Reação"
+  }
+}

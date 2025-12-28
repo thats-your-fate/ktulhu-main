@@ -1,7 +1,9 @@
 use std::{fs, sync::Arc};
 
 use axum::{
-    http::{header::AUTHORIZATION, header::CONTENT_TYPE, HeaderValue, Method},
+    http::{
+        header::AUTHORIZATION, header::CONTENT_TYPE, HeaderName, HeaderValue, Method,
+    },
     Router,
 };
 use tokio::net::TcpListener;
@@ -151,6 +153,8 @@ async fn main() -> anyhow::Result<()> {
         .collect::<Vec<_>>();
     println!("🌐 CORS allowed origins: {:?}", allowed_origin_log);
 
+    let device_header =
+        HeaderName::from_lowercase(b"x-device-hash").expect("invalid device hash header");
     let cors_layer = CorsLayer::new()
         .allow_origin(AllowOrigin::list(allowed_origins.clone()))
         .allow_methods(AllowMethods::list([
@@ -160,7 +164,7 @@ async fn main() -> anyhow::Result<()> {
             Method::DELETE,
             Method::OPTIONS,
         ]))
-        .allow_headers(AllowHeaders::list([CONTENT_TYPE, AUTHORIZATION]))
+        .allow_headers(AllowHeaders::list([CONTENT_TYPE, AUTHORIZATION, device_header.clone()]))
         .allow_credentials(true);
 
     let app = Router::new()

@@ -123,7 +123,9 @@ async fn analyze_then_answer(
 
     if matches!(
         profile,
-        ReasoningProfile::ConstraintPuzzle | ReasoningProfile::FormalLogic
+        ReasoningProfile::ConstraintPuzzle
+            | ReasoningProfile::FormalLogic
+            | ReasoningProfile::MathWordProblem
     ) {
         let validation_prompt = build_validation_prompt(user_text, &analysis, language);
         let validation =

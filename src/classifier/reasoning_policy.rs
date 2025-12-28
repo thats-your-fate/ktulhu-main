@@ -34,11 +34,12 @@ pub fn select_reasoning_mode(
             | ReasoningProfile::ConstraintPuzzle
             | ReasoningProfile::MathWordProblem
             | ReasoningProfile::RiddleMetaphor
+            | ReasoningProfile::ReflectiveAnalysis
     ) {
         return ReasoningMode::AnalyzeThenAnswer;
     }
 
-    let is_reasoning_intent = intent == "reasoning_logical";
+    let is_reasoning_intent = intent == "reasoning";
     let char_count = trimmed.chars().count();
 
     if char_count < 20 && !is_reasoning_intent {
@@ -50,7 +51,7 @@ pub fn select_reasoning_mode(
     }
 
     let mut mode = match intent {
-        "reasoning_logical" => ReasoningMode::AnalyzeThenAnswer,
+        "reasoning" => ReasoningMode::AnalyzeThenAnswer,
         "advice_practical" if char_count > 120 => ReasoningMode::AnalyzeThenAnswer,
         "task_short" if confidence < 0.7 => ReasoningMode::DecomposeThenAnswer,
         _ => ReasoningMode::None,

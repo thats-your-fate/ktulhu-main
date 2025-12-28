@@ -10,8 +10,7 @@
     "regulated_tax_legal": "Regulated / tax / legal task"
   },
   "chat_styles": {
-    "chat_casual": "Casual chat",
-    "chat_greeting": "Greeting",
-    "chat_reaction": "Reaction"
+    "social_chat": "Social / greeting chat",
+    "content_chat": "Content-focused chat"
   }
 }

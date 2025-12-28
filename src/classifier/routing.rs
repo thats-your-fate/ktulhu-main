@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use crate::{manager::ModelManager, prompts};
-use tracing::{info, warn};
+use tracing::info;
 
 const MULTI_INTENT_MIN_LEN: usize = 40;
 const TASK_GATE_THRESHOLD: f32 = 0.55;
@@ -16,7 +16,7 @@ const TASK_LAYER_LABELS: &[&str] = &[
     "task_technical",
     "regulated_tax_legal",
 ];
-const CHAT_STYLE_LABELS: &[&str] = &["chat_casual", "chat_greeting", "chat_reaction"];
+const CHAT_STYLE_LABELS: &[&str] = &["social_chat", "content_chat"];
 
 #[derive(Deserialize)]
 struct RoutingLabelFile {
@@ -99,6 +99,13 @@ fn routing_labels(language: Option<&str>) -> &'static RoutingLabelSet {
 }
 
 
+#[derive(Debug, Clone, Copy, Serialize)]
+pub enum IntentKind {
+    ChatCasual,
+    Task,
+    Reasoning,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct IntentRoutingResult {
     pub intent: String,
@@ -107,6 +114,7 @@ pub struct IntentRoutingResult {
     pub clarification_needed: bool,
     pub notes: Vec<String>,
     pub language: String,
+    pub intent_kind: IntentKind,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_profile: Option<ReasoningProfile>,
 }
@@ -120,6 +128,7 @@ impl Default for IntentRoutingResult {
             clarification_needed: false,
             notes: Vec::new(),
             language: "en".to_string(),
+            intent_kind: IntentKind::ChatCasual,
             reasoning_profile: None,
         }
     }
@@ -128,6 +137,7 @@ impl Default for IntentRoutingResult {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ReasoningProfile {
     General,
+    ReflectiveAnalysis,
     RegulatedTaxLegal,
     FormalLogic,
     ConstraintPuzzle,
@@ -138,40 +148,41 @@ pub enum ReasoningProfile {
     RiddleMetaphor,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ReasoningSubtype {
-    FormalLogic,
-    ConstraintPuzzle,
-    RiddleMetaphor,
-    MathWordProblem,
-    GeneralReasoning,
+struct ReasoningSignal {
+    language: &'static str,
+    keywords: &'static [&'static str],
+    profile: ReasoningProfile,
 }
 
-impl From<ReasoningSubtype> for ReasoningProfile {
-    fn from(value: ReasoningSubtype) -> Self {
-        match value {
-            ReasoningSubtype::FormalLogic => ReasoningProfile::FormalLogic,
-            ReasoningSubtype::ConstraintPuzzle => ReasoningProfile::ConstraintPuzzle,
-            ReasoningSubtype::RiddleMetaphor => ReasoningProfile::RiddleMetaphor,
-            ReasoningSubtype::MathWordProblem => ReasoningProfile::MathWordProblem,
-            ReasoningSubtype::GeneralReasoning => ReasoningProfile::General,
-        }
-    }
-}
+const REFLECTIVE_EN: &[&str] = &["what factors", "before making", "consider", "decision"];
+const REFLECTIVE_ES: &[&str] =
+    &["qué factores", "antes de tomar", "por qué", "analizar", "decisión"];
+const REFLECTIVE_PT: &[&str] =
+    &["quais aspectos", "antes de tomar", "ponderar", "explique", "decisão"];
 
-const SUBTYPE_LABELS: &[&str] = &[
-    "formal logic proof question",
-    "logic puzzle with constraints (switches, doors, rooms, lamps)",
-    "riddle / metaphor question",
-    "math word problem",
-    "general reasoning question",
+static REASONING_SIGNALS: &[ReasoningSignal] = &[
+    ReasoningSignal {
+        language: "en",
+        keywords: REFLECTIVE_EN,
+        profile: ReasoningProfile::ReflectiveAnalysis,
+    },
+    ReasoningSignal {
+        language: "es",
+        keywords: REFLECTIVE_ES,
+        profile: ReasoningProfile::ReflectiveAnalysis,
+    },
+    ReasoningSignal {
+        language: "pt",
+        keywords: REFLECTIVE_PT,
+        profile: ReasoningProfile::ReflectiveAnalysis,
+    },
 ];
 
-pub async fn select_reasoning_profile(
-    models: &ModelManager,
+pub fn select_reasoning_profile(
     text: &str,
     language: Option<&str>,
     intent: &str,
+    intent_kind: IntentKind,
 ) -> ReasoningProfile {
     if intent == "regulated_tax_legal" {
         return log_and_return(
@@ -180,79 +191,19 @@ pub async fn select_reasoning_profile(
         );
     }
 
-    let trimmed = text.trim();
-    let should_subtype = matches!(
-        intent,
-        "reasoning_logical"
-            | "opinion_casual"
-            | "opinion_reflective"
-            | "chat_casual"
-            | "culture_context"
-    ) && trimmed.len() > 25
-        && trimmed.contains('?');
-
-    if should_subtype {
-        let subtype = classify_reasoning_subtype_roberta(models, text, language).await;
-        return log_and_return("roberta reasoning subtype", ReasoningProfile::from(subtype));
+    if matches!(intent_kind, IntentKind::Reasoning) {
+        let profile = infer_reasoning_profile(text, language);
+        return log_and_return("reasoning intent mapping", profile);
     }
 
     log_and_return("intent mapping", profile_from_intent(intent))
 }
 
 pub fn profile_from_intent(intent: &str) -> ReasoningProfile {
-    match intent {
-        "task_short" => ReasoningProfile::General,
-        "advice_practical" => ReasoningProfile::General,
-        "opinion_reflective" => ReasoningProfile::General,
-        "opinion_casual" => ReasoningProfile::General,
-        "culture_context" => ReasoningProfile::General,
-        "reasoning_logical" => ReasoningProfile::General,
-        "chat_casual" => ReasoningProfile::General,
-        "regulated_tax_legal" => ReasoningProfile::RegulatedTaxLegal,
-        _ => ReasoningProfile::General,
-    }
-}
-
-async fn classify_reasoning_subtype_roberta(
-    models: &ModelManager,
-    text: &str,
-    language: Option<&str>,
-) -> ReasoningSubtype {
-    let labels = SUBTYPE_LABELS;
-    let classify_text = format!("Task: classify reasoning subtype.\n\n{text}");
-    match models.roberta.classify(&classify_text, labels).await {
-        Ok((label, score)) => {
-            let threshold = subtype_accept_threshold(language);
-            if score < threshold {
-                return ReasoningSubtype::GeneralReasoning;
-            }
-            match label.as_str() {
-                "formal logic proof question" => ReasoningSubtype::FormalLogic,
-                "logic puzzle with constraints (switches, doors, rooms, lamps)" => {
-                    ReasoningSubtype::ConstraintPuzzle
-                }
-                "riddle / metaphor question" => ReasoningSubtype::RiddleMetaphor,
-                "math word problem" => ReasoningSubtype::MathWordProblem,
-                _ => ReasoningSubtype::GeneralReasoning,
-            }
-        }
-        Err(err) => {
-            warn!(
-                error = ?err,
-                language = language.unwrap_or(""),
-                "reasoning subtype classification failed"
-            );
-            ReasoningSubtype::GeneralReasoning
-        }
-    }
-}
-
-fn subtype_accept_threshold(language: Option<&str>) -> f32 {
-    match language.and_then(|lang| lang.split(|c| c == '-' || c == '_').next()) {
-        Some("ru") => 0.40,
-        Some("es") => 0.45,
-        Some("pt") => 0.45,
-        _ => 0.50,
+    if intent == "regulated_tax_legal" {
+        ReasoningProfile::RegulatedTaxLegal
+    } else {
+        ReasoningProfile::General
     }
 }
 
@@ -265,6 +216,15 @@ fn log_and_return(reason: &str, profile: ReasoningProfile) -> ReasoningProfile {
     profile
 }
 
+fn detect_reasoning_signal(text: &str, language: &str) -> Option<ReasoningProfile> {
+    let lower = text.to_lowercase();
+    REASONING_SIGNALS
+        .iter()
+        .filter(|signal| signal.language == language || signal.language == "any")
+        .find(|signal| signal.keywords.iter().any(|kw| lower.contains(kw)))
+        .map(|signal| signal.profile)
+}
+
 fn normalize_language(language: Option<&str>) -> String {
     language
         .and_then(|lang| lang.split(|c| c == '-' || c == '_').next())
@@ -272,21 +232,35 @@ fn normalize_language(language: Option<&str>) -> String {
         .to_ascii_lowercase()
 }
 
-fn map_task_label(label: &str) -> (&'static str, Option<&'static str>) {
+fn map_task_label(
+    label: &str,
+) -> (&'static str, Option<&'static str>, IntentKind) {
     match label {
-        "task_short" => ("task_short", None),
-        "task_explain" => ("advice_practical", Some("task_explain → advice_practical")),
-        "task_technical" => ("reasoning_logical", Some("task_technical → reasoning_logical")),
-        "regulated_tax_legal" => ("regulated_tax_legal", None),
-        _ => ("task_short", Some("fallback → task_short")),
+        "task_short" => ("task_short", None, IntentKind::Task),
+        "task_explain" => (
+            "advice_practical",
+            Some("task_explain → advice_practical"),
+            IntentKind::Task,
+        ),
+        "task_technical" => (
+            "reasoning",
+            Some("task_technical → reasoning intent"),
+            IntentKind::Reasoning,
+        ),
+        "regulated_tax_legal" => ("regulated_tax_legal", None, IntentKind::Task),
+        _ => ("task_short", Some("fallback → task_short"), IntentKind::Task),
     }
 }
 
-fn map_chat_label(label: &str) -> (&'static str, Option<&'static str>) {
+fn map_chat_label(label: &str) -> (&'static str, Option<&'static str>, IntentKind) {
     match label {
-        "chat_greeting" => ("chat_casual", Some("greeting collapsed into chat_casual")),
-        "chat_reaction" => ("chat_casual", Some("reaction collapsed into chat_casual")),
-        _ => ("chat_casual", None),
+        "social_chat" => ("chat_casual", None, IntentKind::ChatCasual),
+        "content_chat" => (
+            "reasoning",
+            Some("content_chat → reasoning intent"),
+            IntentKind::Reasoning,
+        ),
+        _ => ("chat_casual", Some("fallback → chat_casual"), IntentKind::ChatCasual),
     }
 }
 
@@ -304,6 +278,19 @@ pub async fn route_intent(
 
     if trimmed.is_empty() {
         result.notes.push("empty input".into());
+        return Ok(result);
+    }
+
+    if let Some(signal_profile) =
+        detect_reasoning_signal(trimmed, resolved_language.as_str())
+    {
+        result.intent = "reasoning".to_string();
+        result.intent_kind = IntentKind::Reasoning;
+        result.confidence = 1.0;
+        result.reasoning_profile = Some(signal_profile);
+        result
+            .notes
+            .push("reasoning override: keyword signal detected".into());
         return Ok(result);
     }
 
@@ -358,6 +345,8 @@ pub async fn route_intent(
     // ------------------------------------------------------------
     // LAYER 2 — TASK KIND (only if task)
     // ------------------------------------------------------------
+    let intent_kind: IntentKind;
+
     let (intent, confidence) = if is_task {
         let (task_label, conf) = models
             .roberta
@@ -380,10 +369,11 @@ pub async fn route_intent(
             display = display_text
         ));
 
-        let (intent, note) = map_task_label(&task_label);
+        let (intent, note, mapped_kind) = map_task_label(&task_label);
         if let Some(n) = note {
             notes.push(n.to_string());
         }
+        intent_kind = mapped_kind;
 
         (intent.to_string(), conf)
     } else {
@@ -411,24 +401,20 @@ pub async fn route_intent(
             display = display_text
         ));
 
-        let (intent, note) = map_chat_label(&chat_label);
+        let (intent, note, mapped_kind) = map_chat_label(&chat_label);
         if let Some(n) = note {
             notes.push(n.to_string());
         }
-
+        intent_kind = mapped_kind;
         (intent.to_string(), conf)
     };
 
-    // ------------------------------------------------------------
-    // Reasoning profile (unchanged, downstream concern)
-    // ------------------------------------------------------------
     let reasoning_profile = select_reasoning_profile(
-        models,
         text,
         Some(resolved_language.as_str()),
         intent.as_str(),
-    )
-    .await;
+        intent_kind,
+    );
 
     info!(
         final_intent = intent.as_str(),
@@ -442,6 +428,7 @@ pub async fn route_intent(
     result.confidence = confidence;
     result.notes = notes;
     result.reasoning_profile = Some(reasoning_profile);
+    result.intent_kind = intent_kind;
 
     Ok(result)
 }
@@ -485,4 +472,90 @@ fn push_segment(buffer: &mut String, segments: &mut Vec<String>) {
         segments.push(trimmed.to_string());
     }
     buffer.clear();
+}
+
+fn infer_reasoning_profile(text: &str, _language: Option<&str>) -> ReasoningProfile {
+    let lower = text.to_lowercase();
+
+    if detect_formal_constraints(&lower) {
+        return ReasoningProfile::ConstraintPuzzle;
+    }
+    if detect_math_tokens(&lower) {
+        return ReasoningProfile::MathWordProblem;
+    }
+    if detect_code_tokens(&lower) {
+        return ReasoningProfile::AlgorithmicCode;
+    }
+    if detect_policy_terms(&lower) {
+        return ReasoningProfile::RegulatedTaxLegal;
+    }
+
+    ReasoningProfile::ReflectiveAnalysis
+}
+
+fn detect_formal_constraints(text: &str) -> bool {
+    const FORMAL_KEYWORDS: &[&str] = &[
+        "sudoku",
+        "logic grid",
+        "truth table",
+        "if and only if",
+        "premise",
+        "deduce",
+        "switch",
+        "door",
+        "lamp",
+        "constraint",
+    ];
+    FORMAL_KEYWORDS.iter().any(|kw| text.contains(kw))
+}
+
+fn detect_math_tokens(text: &str) -> bool {
+    const MATH_KEYWORDS: &[&str] = &[
+        "sum",
+        "total",
+        "ratio",
+        "perimeter",
+        "probability",
+        "algebra",
+        "equation",
+        "percentage",
+        "porcentaje",
+        "porcentagem",
+        "promedio",
+    ];
+    let digit_count = text.chars().filter(|c| c.is_ascii_digit()).count();
+    let has_equation = text.contains('+') || text.contains('-') || text.contains('=') || digit_count > 6;
+    has_equation || MATH_KEYWORDS.iter().any(|kw| text.contains(kw))
+}
+
+fn detect_code_tokens(text: &str) -> bool {
+    const CODE_KEYWORDS: &[&str] = &[
+        "fn ",
+        "def ",
+        "class ",
+        "console.",
+        "return ",
+        "public ",
+        "private ",
+        "async ",
+        "await ",
+        "```",
+    ];
+    CODE_KEYWORDS.iter().any(|kw| text.contains(kw))
+}
+
+fn detect_policy_terms(text: &str) -> bool {
+    const POLICY_KEYWORDS: &[&str] = &[
+        "tax",
+        "irs",
+        "regulation",
+        "compliance",
+        "policy",
+        "legal",
+        "contract",
+        "gdpr",
+        "lei",
+        "legislación",
+    ];
+    POLICY_KEYWORDS.iter().any(|kw| text.contains(kw))
 }

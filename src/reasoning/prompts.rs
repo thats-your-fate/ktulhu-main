@@ -77,6 +77,7 @@ fn prompts_for_language(language: Option<&str>) -> &'static LanguageReasoningPro
 fn profile_key(profile: ReasoningProfile) -> &'static str {
     match profile {
         ReasoningProfile::General => "general",
+        ReasoningProfile::ReflectiveAnalysis => "reflective_analysis",
         ReasoningProfile::RegulatedTaxLegal => "regulated_tax_legal",
         ReasoningProfile::FormalLogic => "formal_logic",
         ReasoningProfile::ConstraintPuzzle => "constraint_puzzle",

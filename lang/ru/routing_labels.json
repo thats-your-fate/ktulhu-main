@@ -10,8 +10,7 @@
     "regulated_tax_legal": "Регулируемая / юридическая тема"
   },
   "chat_styles": {
-    "chat_casual": "Неформальный чат",
-    "chat_greeting": "Приветствие",
-    "chat_reaction": "Реакция"
+    "social_chat": "Социальный чат / приветствие",
+    "content_chat": "Содержательный чат / обсуждение"
   }
 }

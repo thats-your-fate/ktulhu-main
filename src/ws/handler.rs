@@ -16,6 +16,7 @@ const REASONING_BACKOFF_SECS: u64 = 120;
 use crate::conversation::{build_ministral_prompt, trim_history};
 use crate::db::DBLayer;
 use crate::inference::InferenceService;
+use crate::internal_api::handlers::ensure_chat_for_device;
 use crate::manager::ModelManager;
 use crate::model::chat::Chat;
 use crate::model::message::{Message, MessageAttachment};
@@ -264,8 +265,8 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                         // Ensure chat exists (create if missing)
                         let chat_id = match ensure_chat_for_device(
                             &state.db,
-                            parsed.chat_id.clone(),
-                            parsed.device_hash.clone(),
+                            parsed.chat_id.as_str(),
+                            parsed.device_hash.as_str(),
                         )
                         .await
                         {
@@ -299,7 +300,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                             }
                         }
 
-                        let mut user_text = parsed.text.clone();
+                        let user_text = parsed.text.clone();
 
                         if let Some(combined) = attachment_summary_combined.clone() {
                             debug!("attachment descriptions provided: {}", combined);
@@ -601,31 +602,6 @@ fn json_system(event: &str) -> serde_json::Value {
 // ------------------------------------------------------------
 // STREAMING INFERENCE HELPERS
 // ------------------------------------------------------------
-pub(crate) async fn ensure_chat_for_device(
-    db: &DBLayer,
-    chat_id: String,
-    device_hash: String,
-) -> anyhow::Result<String> {
-    if chat_id.is_empty() {
-        return Err(anyhow!("chat_id is required"));
-    }
-
-    if let Some(_) = db.load_chat(&chat_id).await? {
-        return Ok(chat_id);
-    }
-
-    let chat = Chat {
-        id: chat_id.clone(),
-        title: None,
-        user_id: None,
-        device_hash: Some(device_hash),
-        updated_ts: chrono::Utc::now().timestamp(),
-        meta: None,
-    };
-    db.save_chat(&chat).await?;
-    Ok(chat_id)
-}
-
 pub(crate) async fn touch_chat(
     db: &DBLayer,
     chat_id: &str,

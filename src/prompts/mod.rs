@@ -2,21 +2,6 @@ use once_cell::sync::Lazy;
 use serde::Deserialize;
 use std::collections::HashMap;
 
-// NOTE:
-// Intent prompts are language-localized to improve
-// tone, clarity, and reasoning alignment.
-// Core reasoning logic remains language-agnostic.
-
-pub const INTENT_LABELS: &[&str] = &[
-    "chat_casual",
-    "task_short",
-    "advice_practical",
-    "opinion_reflective",
-    "opinion_casual",
-    "culture_context",
-    "reasoning_logical",
-];
-
 const DEFAULT_INTENT: &str = "chat_casual";
 
 #[derive(Deserialize)]

@@ -93,7 +93,6 @@ async fn main() -> anyhow::Result<()> {
     let infer = Arc::new(crate::inference::InferenceService::new(
         models.mistral.clone(),
         models.phi.clone(),
-        models.roberta.clone(),
     ));
 
     // -----------------------------------

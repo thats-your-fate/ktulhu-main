@@ -29,12 +29,8 @@ pub struct AuthResponse {
 
 #[derive(Debug, Deserialize)]
 struct GoogleClaims {
-    pub iss: String,
     pub sub: String,
-    pub aud: String,
     pub email: Option<String>,
-    pub email_verified: Option<bool>,
-    pub exp: usize,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

@@ -95,7 +95,7 @@ pub fn analysis_hidden_instruction(
 }
 
 pub fn decomposition_hidden_instruction(
-    plan: &str,
+    _plan: &str,
     profile: ReasoningProfile,
     language: Option<&str>,
 ) -> String {

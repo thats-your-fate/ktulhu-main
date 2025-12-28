@@ -5,8 +5,6 @@ use tokio::sync::RwLock;
 #[derive(Debug, Deserialize, Clone)]
 pub struct Jwk {
     pub kid: String,
-    pub kty: String,
-    pub alg: String,
     pub n: String,
     pub e: String,
 }

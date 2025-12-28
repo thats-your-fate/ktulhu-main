@@ -1,17 +1,6 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Deserialize)]
-pub struct AuthRequest {
-    pub id_token: String,
-}
-
-#[derive(Serialize)]
-pub struct AuthResponse {
-    pub user_id: String,
-    pub jwt: String,
-}
-
-#[derive(Deserialize)]
 pub struct EmailRegisterRequest {
     pub email: String,
     pub password: String,

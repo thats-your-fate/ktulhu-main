@@ -114,32 +114,6 @@ impl DBLayer {
         Ok(false)
     }
 
-    /// Get last N messages (for context pruning)
-    pub async fn list_last_messages(&self, chat_id: &str, n: usize) -> Result<Vec<Message>> {
-        let prefix = format!("chat:{}:msg:", chat_id);
-
-        // Reverse iterator
-        let iter = self.db.iterator(IteratorMode::End);
-        let mut collected = Vec::new();
-
-        for item in iter {
-            let (key, val) = item?;
-            let k = str::from_utf8(&key)?;
-
-            if k.starts_with(&prefix) {
-                let msg: Message = serde_json::from_slice(&val)?;
-                collected.push(normalize_message(msg));
-
-                if collected.len() >= n {
-                    break;
-                }
-            }
-        }
-
-        collected.reverse();
-        Ok(collected)
-    }
-
     /// Collect the latest raw messages across all chats, ordered by timestamp desc.
     pub async fn list_recent_messages(&self, limit: usize) -> Result<Vec<Message>> {
         if limit == 0 {
@@ -389,63 +363,6 @@ impl DBLayer {
         Ok(results)
     }
 
-    pub async fn save_user_device(&self, device: &UserDevice) -> Result<()> {
-        let key = Self::user_device_key(&device.user_id, &device.id);
-        let val = serde_json::to_vec(device)?;
-
-        self.db.put(key, val)?;
-
-        // reverse lookup for authentication by device
-        let lookup_key = Self::device_lookup_key(&device.device_hash);
-        self.db.put(lookup_key, device.id.as_bytes())?;
-
-        Ok(())
-    }
-
-    pub async fn load_user_device(
-        &self,
-        user_id: &str,
-        device_id: &str,
-    ) -> Result<Option<UserDevice>> {
-        let key = Self::user_device_key(user_id, device_id);
-        Ok(self
-            .db
-            .get(key)?
-            .map(|v| serde_json::from_slice(&v).unwrap()))
-    }
-
-    pub async fn find_device_by_hash(&self, device_hash: &str) -> Result<Option<UserDevice>> {
-        let lookup_key = Self::device_lookup_key(device_hash);
-
-        let Some(device_id_bytes) = self.db.get(lookup_key)? else {
-            return Ok(None);
-        };
-
-        let device_id = String::from_utf8_lossy(&device_id_bytes).to_string();
-
-        // Now we must find the corresponding user
-        // → search all user_device:{user_id}:{device_id}
-        let prefix = "user_device:";
-        for item in self
-            .db
-            .iterator(IteratorMode::From(prefix.as_bytes(), Direction::Forward))
-        {
-            let (key, val) = item?;
-            let k = std::str::from_utf8(&key)?;
-
-            if !k.contains(&device_id) {
-                continue;
-            }
-
-            let dev: UserDevice = serde_json::from_slice(&val)?;
-            if dev.device_hash == device_hash {
-                return Ok(Some(dev));
-            }
-        }
-
-        Ok(None)
-    }
-
     pub async fn list_devices_for_user(&self, user_id: &str) -> Result<Vec<UserDevice>> {
         let prefix = format!("user_device:{user_id}:");
         let mut out = Vec::new();
@@ -522,13 +439,6 @@ impl DBLayer {
         Ok(())
     }
 
-    pub async fn user_id_by_device(&self, device_hash: &str) -> Result<Option<String>> {
-        let key = Self::device_lookup_key(device_hash);
-        Ok(self
-            .db
-            .get(key)?
-            .map(|v| String::from_utf8_lossy(&v).to_string()))
-    }
 }
 
 fn normalize_message(mut msg: Message) -> Message {

@@ -27,12 +27,8 @@ pub struct AuthResponse {
 // Apple ID token claims (simplified)
 #[derive(Debug, Deserialize)]
 struct AppleIdClaims {
-    iss: String,
     sub: String,
-    aud: String,
-    exp: usize,
     email: Option<String>,
-    email_verified: Option<String>,
 }
 
 // Your own JWT claims for clients
@@ -50,10 +46,8 @@ struct JwkSet {
 #[derive(Debug, Deserialize)]
 struct Jwk {
     kid: String,
-    kty: String,
     n: String,
     e: String,
-    alg: String,
 }
 
 pub async fn apple_login_handler(
@@ -184,7 +178,7 @@ pub async fn apple_login_handler(
     }))
 }
 
-pub async fn upsert_apple_user(db: &DBLayer, claims: &AppleIdClaims) -> anyhow::Result<User> {
+async fn upsert_apple_user(db: &DBLayer, claims: &AppleIdClaims) -> anyhow::Result<User> {
     let provider_id = format!("apple:{}", claims.sub);
     let email_ref = claims.email.as_deref();
 

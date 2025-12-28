@@ -137,7 +137,6 @@ struct StripeCheckoutSession {
 
 #[derive(Deserialize)]
 struct StripeSessionDetails {
-    id: String,
     status: Option<String>,
     payment_status: Option<String>,
     #[serde(default)]

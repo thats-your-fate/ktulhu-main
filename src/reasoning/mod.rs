@@ -2,9 +2,7 @@ mod executor;
 mod planner;
 mod prompts;
 
-pub use crate::classifier::routing::{
-    profile_from_intent, select_reasoning_profile, ReasoningProfile,
-};
+pub use crate::classifier::routing::ReasoningProfile;
 
 use std::sync::{
     atomic::{AtomicBool, Ordering},

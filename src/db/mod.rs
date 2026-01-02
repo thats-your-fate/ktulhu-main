@@ -438,7 +438,6 @@ impl DBLayer {
 
         Ok(())
     }
-
 }
 
 fn normalize_message(mut msg: Message) -> Message {

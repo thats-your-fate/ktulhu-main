@@ -30,29 +30,13 @@ impl RobertaService {
         let vocab = snapshot_dir.join("vocab.json");
         let merges = snapshot_dir.join("merges.txt");
 
-        // ---- BPE builder ----
-        let bpe = BPE::from_file(
-            vocab
-                .to_str()
-                .ok_or_else(|| anyhow!("Invalid vocab path"))?,
-            merges
-                .to_str()
-                .ok_or_else(|| anyhow!("Invalid merges path"))?,
-        )
-        .unk_token("<unk>".to_string())
-        .build()
-        .map_err(|e| anyhow!("BPE tokenizer build error: {e}"))?;
+use tokenizers::Tokenizer;
 
-        // ---- Build tokenizer ----
-        let mut tokenizer = Tokenizer::new(bpe);
+let tokenizer = Tokenizer::from_file(snapshot_dir.join("tokenizer.json"))
+    .map_err(|e| anyhow!("Failed to load tokenizer.json: {e}"))?;
 
-        // Normalizer: must be wrapped in Option<NormalizerWrapper>
-        tokenizer.with_normalizer(Some(NormalizerWrapper::NFC(NFC)));
+let tokenizer = Arc::new(tokenizer);
 
-        // Pre-tokenizer: must be wrapped in Option<PreTokenizerWrapper>
-        // tokenizer.with_pre_tokenizer(Some(PreTokenizerWrapper::Whitespace(Whitespace::default())));
-        tokenizer.with_pre_tokenizer(Some(PreTokenizerWrapper::ByteLevel(ByteLevel::default())));
-        let tokenizer = Arc::new(tokenizer);
 
         // Config
         let mut config: BertConfig =
@@ -76,11 +60,16 @@ impl RobertaService {
 
         println!("📦 RoBERTa shards = {}", shards.len());
 
-        // Load weights (mmaped)
-        let vb = unsafe { VarBuilder::from_mmaped_safetensors(&shards, DType::F32, &device)? };
+let vb = unsafe {
+    VarBuilder::from_mmaped_safetensors(&shards, DType::F32, &device)?
+};
 
-        // Initialize model
-        let model = Arc::new(Mutex::new(BertModel::load(vb, &config)?));
+// IMPORTANT: most RoBERTa checkpoints are under "roberta.*"
+let vb = vb.pp("roberta");
+
+// Now load
+let model = Arc::new(Mutex::new(BertModel::load(vb, &config)?));
+
 
         println!("🚀 Loaded RoBERTa on CUDA:{device_id}");
 
@@ -93,76 +82,74 @@ impl RobertaService {
         })
     }
 
-pub async fn embed(&self, text: &str) -> Result<Vec<f32>> {
-    // 1) Tokenize
-    let enc = self
-        .tokenizer
-        .encode(text, true)
-        .map_err(|e| anyhow!("RoBERTa tokenizer encode error: {e}"))?;
+    pub async fn embed(&self, text: &str) -> Result<Vec<f32>> {
+        // 1) Tokenize
+        let enc = self
+            .tokenizer
+            .encode(text, true)
+            .map_err(|e| anyhow!("RoBERTa tokenizer encode error: {e}"))?;
 
-    let ids_u32 = enc.get_ids().to_vec();
-    if let Some(&max_id) = ids_u32.iter().max() {
-        if max_id >= self.vocab_size {
-            return Err(anyhow!(
-                "token id overflow: saw max_id={} but vocab_size={}",
-                max_id,
-                self.vocab_size
-            ));
+        let ids_u32 = enc.get_ids().to_vec();
+        if let Some(&max_id) = ids_u32.iter().max() {
+            if max_id >= self.vocab_size {
+                return Err(anyhow!(
+                    "token id overflow: saw max_id={} but vocab_size={}",
+                    max_id,
+                    self.vocab_size
+                ));
+            }
         }
-    }
 
-    let mut ids = ids_u32;
-    if ids.len() > self.max_len {
-        ids.truncate(self.max_len);
-    }
-    let seq_len = ids.len();
-
-    // 2) Build tensors
-    let input = Tensor::new(ids.as_slice(), &self.device)?
-        .unsqueeze(0)?; // [1, seq]
-
-    let mask = Tensor::ones(&[1, seq_len], DType::I64, &self.device)?;
-    let token_type_ids = Tensor::zeros(input.dims(), DType::I64, &self.device)?;
-
-    // 3) Forward
-    let hidden = {
-        let m = self.model.lock().await;
-        m.forward(&input, &token_type_ids, Some(&mask))?
-    };
-    // hidden: [1, seq, 768]
-
-    // 4) Mean pooling (exclude padding)
-    let hidden = hidden.squeeze(0)?; // [seq, 768]
-    let mask_f = mask.squeeze(0)?.to_dtype(DType::F32)?; // [seq]
-
-    let hidden = hidden.to_vec2::<f32>()?;
-    let mask_vec = mask_f.to_vec1::<f32>()?;
-
-    let dims = hidden.first().map(|row| row.len()).unwrap_or(0);
-    let mut sum = vec![0f32; dims];
-    let mut count = 0f32;
-
-    for (row, &w) in hidden.iter().zip(mask_vec.iter()) {
-        count += w;
-        for (acc, &val) in sum.iter_mut().zip(row.iter()) {
-            *acc += val * w;
+        let mut ids = ids_u32;
+        if ids.len() > self.max_len {
+            ids.truncate(self.max_len);
         }
+        let seq_len = ids.len();
+
+        // 2) Build tensors
+        let input = Tensor::new(ids.as_slice(), &self.device)?.unsqueeze(0)?; // [1, seq]
+
+        let mask = Tensor::ones(&[1, seq_len], DType::I64, &self.device)?;
+        let token_type_ids = Tensor::zeros(input.dims(), DType::I64, &self.device)?;
+
+        // 3) Forward
+        let hidden = {
+            let m = self.model.lock().await;
+            m.forward(&input, &token_type_ids, Some(&mask))?
+        };
+        // hidden: [1, seq, 768]
+
+        // 4) Mean pooling (exclude padding)
+        let hidden = hidden.squeeze(0)?; // [seq, 768]
+        let mask_f = mask.squeeze(0)?.to_dtype(DType::F32)?; // [seq]
+
+        let hidden = hidden.to_vec2::<f32>()?;
+        let mask_vec = mask_f.to_vec1::<f32>()?;
+
+        let dims = hidden.first().map(|row| row.len()).unwrap_or(0);
+        let mut sum = vec![0f32; dims];
+        let mut count = 0f32;
+
+        for (row, &w) in hidden.iter().zip(mask_vec.iter()) {
+            count += w;
+            for (acc, &val) in sum.iter_mut().zip(row.iter()) {
+                *acc += val * w;
+            }
+        }
+
+        if count <= 1e-6 {
+            count = 1e-6;
+        }
+        for val in sum.iter_mut() {
+            *val /= count;
+        }
+        let mut emb = sum;
+
+        // 5) L2 normalize
+        l2_normalize(&mut emb);
+
+        Ok(emb)
     }
-
-    if count <= 1e-6 {
-        count = 1e-6;
-    }
-    for val in sum.iter_mut() {
-        *val /= count;
-    }
-    let mut emb = sum;
-
-    // 5) L2 normalize
-    l2_normalize(&mut emb);
-
-    Ok(emb)
-}
-
 
     /// Simple text classification (cosine similarity to label embeddings)
     pub async fn classify(&self, text: &str, labels: &[&str]) -> Result<(String, f32)> {
@@ -199,7 +186,6 @@ fn cosine(a: &[f32], b: &[f32]) -> f32 {
 
     dot / (na.sqrt() * nb.sqrt()).max(1e-9)
 }
-
 
 fn l2_normalize(v: &mut [f32]) {
     let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-12);

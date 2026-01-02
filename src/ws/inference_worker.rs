@@ -8,10 +8,7 @@ use uuid::Uuid;
 
 use crate::conversation::{strip_chatml_markers, trim_partial_chatml};
 use crate::db::DBLayer;
-use crate::inference::{
-    byte_decoder::tidy_decoded_text,
-    InferenceService,
-};
+use crate::inference::{byte_decoder::tidy_decoded_text, InferenceService};
 use crate::model::message::Message;
 
 use super::handler::touch_chat;
@@ -160,7 +157,6 @@ async fn process_job(job: InferenceJob) {
 
     let final_response = trim_partial_chatml(&strip_chatml_markers(&assistant_reply)).to_string();
     let final_response = tidy_decoded_text(&final_response);
-
 
     let assistant_msg = Message {
         id: Uuid::new_v4().to_string(),

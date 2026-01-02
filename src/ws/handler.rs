@@ -7,12 +7,9 @@ use serde::Deserialize;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
-use tokio::time::{timeout, Duration, Instant};
+use tokio::time::{timeout, Duration};
 
 use crate::attachments::{attachment_summaries, IncomingAttachment};
-use crate::classifier::reasoning_policy::{select_reasoning_mode, ReasoningMode};
-
-const REASONING_BACKOFF_SECS: u64 = 120;
 use crate::conversation::{build_ministral_prompt, trim_history};
 use crate::db::DBLayer;
 use crate::inference::InferenceService;
@@ -21,7 +18,6 @@ use crate::manager::ModelManager;
 use crate::model::chat::Chat;
 use crate::model::message::{Message, MessageAttachment};
 use crate::payment::PaymentService;
-use crate::reasoning::{run_reasoning, ReasoningProfile, ReasoningResult};
 use crate::ws::inference_worker::{InferenceJob, InferenceWorker};
 use anyhow::anyhow;
 use tracing::{debug, info};
@@ -69,7 +65,6 @@ struct WsSession {
     session_id: Option<String>,
     chat_id: Option<String>,
     cancel: Arc<AtomicBool>,
-    reasoning_backoff_until: Option<Instant>,
 }
 
 // ------------------------------------------------------------
@@ -98,7 +93,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     // Dedicated writer task keeps websocket flushing smoothly.
     let writer = tokio::spawn(async move {
         while let Some(msg) = rx.recv().await {
-            match timeout(Duration::from_secs(5), ws_sender.send(msg)).await {
+            match timeout(Duration::from_secs(30), ws_sender.send(msg)).await {
                 Ok(Ok(_)) => {}
                 Ok(Err(_)) => break,
                 Err(_) => continue,
@@ -216,39 +211,26 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                             }
                         };
 
-                        info!(
-                            chat_id = parsed.chat_id.as_str(),
-                            request_id = parsed.request_id.as_str(),
-                            provided_language = parsed.language.as_deref().unwrap_or(""),
-                            routing_language = routing_result.language.as_str(),
-                            "intent routing language resolved"
-                        );
-
                         let routing_language = routing_result.language.clone();
-
-                        for note in &routing_result.notes {
-                            info!(
-                                chat_id = parsed.chat_id.as_str(),
-                                request_id = parsed.request_id.as_str(),
-                                note = note.as_str(),
-                                "intent routing note"
-                            );
-                        }
-
-                        let reasoning_profile = routing_result
-                            .reasoning_profile
-                            .unwrap_or(ReasoningProfile::General);
-
                         let intent = routing_result.intent.clone();
                         let intent_confidence = routing_result.confidence;
 
+                        let decision_chain = if routing_result.notes.is_empty() {
+                            "n/a".to_string()
+                        } else {
+                            routing_result.notes.join(" → ")
+                        };
                         info!(
                             chat_id = parsed.chat_id.as_str(),
                             request_id = parsed.request_id.as_str(),
                             intent = intent.as_str(),
                             intent_confidence,
                             routing_language = routing_result.language.as_str(),
-                            "intent decision triggered"
+                            prompt_key = routing_result.prompt_key.as_str(),
+                            routing_path = ?routing_result.path,
+                            intent_kind = ?routing_result.intent_kind,
+                            chain = decision_chain.as_str(),
+                            "intent decision summary"
                         );
 
                         // Send classifier debug meta
@@ -353,10 +335,17 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                         history = trim_history(history, 24);
 
                         // Build Mistral prompt
-                        let system_prompt = crate::prompts::prompt_for_intent(
-                            &intent,
+                        let mut system_prompt = crate::prompts::prompt_for_intent(
+                            routing_result.prompt_key.as_str(),
                             Some(routing_language.as_str()),
                         );
+                        if crate::classifier::routing::is_chat_followup_intent(
+                            routing_result.intent.as_str(),
+                        ) {
+                            system_prompt.push_str("\n\n");
+                            system_prompt
+                                .push_str(crate::prompts::chat_layer_engagement_hint());
+                        }
 
                         let base_prompt = build_ministral_prompt(&history, Some(&system_prompt));
 
@@ -373,122 +362,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                             s.cancel.clone()
                         };
 
-                        let reasoning_backoff_active = {
-                            let mut s = session.lock().await;
-                            if let Some(until) = s.reasoning_backoff_until {
-                                if Instant::now() < until {
-                                    true
-                                } else {
-                                    s.reasoning_backoff_until = None;
-                                    false
-                                }
-                            } else {
-                                false
-                            }
-                        };
-
-                        let mut reasoning_mode = select_reasoning_mode(
-                            reasoning_profile,
-                            intent.as_str(),
-                            intent_confidence,
-                            parsed.text.as_str(),
-                        );
-
-                        if reasoning_backoff_active {
-                            info!(
-                                chat_id = parsed.chat_id.as_str(),
-                                request_id = parsed.request_id.as_str(),
-                                "reasoning skipped due to temporary backoff"
-                            );
-                            reasoning_mode = ReasoningMode::None;
-                        }
-
-                        let reasoning_future = run_reasoning(
-                            &state.models,
-                            reasoning_mode,
-                            parsed.text.as_str(),
-                            Some(routing_language.as_str()),
-                            &base_prompt,
-                            reasoning_profile,
-                            cancel_flag.clone(),
-                        );
-                        let mut reasoning_timed_out = false;
-                        let mut reasoning_failed = false;
-                        let reasoning_result =
-                            match timeout(Duration::from_secs(12), reasoning_future).await {
-                                Ok(Ok(result)) => result,
-                                Ok(Err(err)) => {
-                                    eprintln!("reasoning failed: {err}");
-                                    reasoning_failed = true;
-                                    ReasoningResult::fallback(&base_prompt)
-                                }
-                                Err(_) => {
-                                    eprintln!("reasoning timed out");
-                                    reasoning_timed_out = true;
-                                    ReasoningResult::fallback(&base_prompt)
-                                }
-                            };
-
-                        if reasoning_timed_out || reasoning_failed {
-                            let mut s = session.lock().await;
-                            s.reasoning_backoff_until =
-                                Some(Instant::now() + Duration::from_secs(REASONING_BACKOFF_SECS));
-                        } else if !matches!(reasoning_mode, ReasoningMode::None) {
-                            let mut s = session.lock().await;
-                            s.reasoning_backoff_until = None;
-                        }
-
-                        let ReasoningResult {
-                            final_prompt,
-                            meta,
-                            debug: debug_info,
-                        } = reasoning_result;
-
-                        info!(
-                            chat_id = parsed.chat_id.as_str(),
-                            request_id = parsed.request_id.as_str(),
-                            reasoning_stage = meta.stage.as_str(),
-                            reasoning_steps = meta.steps,
-                            "reasoning applied"
-                        );
-
-                        let should_emit_debug =
-                            meta.steps > 0 || debug_info.validation_output.is_some();
-
-                        if should_emit_debug {
-                            info!(
-                                chat_id = parsed.chat_id.as_str(),
-                                request_id = parsed.request_id.as_str(),
-                                intermediate_prompt =
-                                    debug_info.intermediate_prompt.as_deref().unwrap_or(""),
-                                intermediate_output =
-                                    debug_info.intermediate_output.as_deref().unwrap_or(""),
-                                validation_output =
-                                    debug_info.validation_output.as_deref().unwrap_or(""),
-                                hidden_block = debug_info.hidden_block.as_deref().unwrap_or(""),
-                                "reasoning debug info"
-                            );
-                            if let Err(err) = send_json(
-                                &tx,
-                                serde_json::json!({
-                                    "type": "reasoning_debug",
-                                    "stage": meta.stage.as_str(),
-                                    "steps": meta.steps,
-                                    "intermediate_prompt": debug_info.intermediate_prompt,
-                                    "intermediate_output": debug_info.intermediate_output,
-                                    "validation_prompt": debug_info.validation_prompt,
-                                    "validation_output": debug_info.validation_output,
-                                    "hidden_block": debug_info.hidden_block,
-                                }),
-                            )
-                            .await
-                            {
-                                eprintln!("failed to send ws message: {err}");
-                                break 'socket_loop;
-                            }
-                        }
-
-                        let prompt_for_model = final_prompt;
+                        let prompt_for_model = base_prompt;
 
                         // Queue inference job — ORIGINAL logic
                         let job = InferenceJob {
@@ -578,7 +452,7 @@ async fn send_json(
 ) -> anyhow::Result<()> {
     let msg = WsMessage::Text(value.to_string().into());
 
-    match timeout(Duration::from_secs(2), sender.send(msg)).await {
+    match timeout(Duration::from_secs(30), sender.send(msg)).await {
         Ok(Ok(_)) => Ok(()),
         Ok(Err(_)) => Err(anyhow!("ws channel closed")),
         Err(_) => Ok(()),

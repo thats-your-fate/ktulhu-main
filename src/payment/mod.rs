@@ -116,15 +116,9 @@ impl PaymentService {
         }
 
         if self.success_url.contains('?') {
-            format!(
-                "{}&session_id={{CHECKOUT_SESSION_ID}}",
-                self.success_url
-            )
+            format!("{}&session_id={{CHECKOUT_SESSION_ID}}", self.success_url)
         } else {
-            format!(
-                "{}?session_id={{CHECKOUT_SESSION_ID}}",
-                self.success_url
-            )
+            format!("{}?session_id={{CHECKOUT_SESSION_ID}}", self.success_url)
         }
     }
 }
@@ -272,11 +266,7 @@ async fn activate_subscription(
     }
 
     if let Some(subscription_id) = session.subscription.clone() {
-        if user
-            .stripe_subscription_id
-            .as_deref()
-            != Some(subscription_id.as_str())
-        {
+        if user.stripe_subscription_id.as_deref() != Some(subscription_id.as_str()) {
             user.stripe_subscription_id = Some(subscription_id);
             updated = true;
         }

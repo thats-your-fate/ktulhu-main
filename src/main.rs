@@ -1,9 +1,7 @@
 use std::{fs, sync::Arc};
 
 use axum::{
-    http::{
-        header::AUTHORIZATION, header::CONTENT_TYPE, HeaderName, HeaderValue, Method,
-    },
+    http::{header::AUTHORIZATION, header::CONTENT_TYPE, HeaderName, HeaderValue, Method},
     Router,
 };
 use tokio::net::TcpListener;
@@ -17,7 +15,6 @@ mod auth;
 mod classifier;
 mod conversation;
 mod db;
-mod embeddings;
 mod external_api;
 mod inference;
 mod internal_api;
@@ -25,7 +22,6 @@ mod manager;
 mod model;
 mod payment;
 mod prompts;
-mod reasoning;
 mod ws;
 
 use db::DBLayer;
@@ -79,10 +75,7 @@ async fn main() -> anyhow::Result<()> {
     let models = Arc::new(ModelManager::new().await?);
 
     println!("5️⃣ Sanity check (what you asked for)");
-    let test = models
-        .roberta
-        .embed("machine learning is cool")
-        .await?;
+    let test = models.roberta.embed("machine learning is cool").await?;
     println!(
         "🧪 embedding check → dim={} norm={:.4}",
         test.len(),
@@ -93,7 +86,8 @@ async fn main() -> anyhow::Result<()> {
     // Unified inference service
     // -----------------------------------
     let infer = Arc::new(crate::inference::InferenceService::new(
-        models.mistral.clone(),
+        models.mistral_reasoning.clone(),
+        models.mistral8_b.clone(),
         models.phi.clone(),
     ));
 
@@ -164,7 +158,11 @@ async fn main() -> anyhow::Result<()> {
             Method::DELETE,
             Method::OPTIONS,
         ]))
-        .allow_headers(AllowHeaders::list([CONTENT_TYPE, AUTHORIZATION, device_header.clone()]))
+        .allow_headers(AllowHeaders::list([
+            CONTENT_TYPE,
+            AUTHORIZATION,
+            device_header.clone(),
+        ]))
         .allow_credentials(true);
 
     let app = Router::new()

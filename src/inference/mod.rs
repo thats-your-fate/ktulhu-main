@@ -11,16 +11,15 @@ use ministral_8b_resoning::Ministral8BResoningService;
 use phi::PhiService;
 
 pub struct InferenceService {
-    #[allow(dead_code)]
-    pub ministral8_b: Arc<Ministral8BService>,
-    pub mistral_reasoning: Arc<Ministral8BResoningService>,
+    pub mistral_reasoning: Option<Arc<Ministral8BResoningService>>,
+    pub ministral8_b: Option<Arc<Ministral8BService>>,
     pub phi: Arc<PhiService>,
 }
 
 impl InferenceService {
     pub fn new(
-        mistral_reasoning: Arc<Ministral8BResoningService>,
-        ministral8_b: Arc<Ministral8BService>,
+        mistral_reasoning: Option<Arc<Ministral8BResoningService>>,
+        ministral8_b: Option<Arc<Ministral8BService>>,
         phi: Arc<PhiService>,
     ) -> Self {
         Self {
@@ -35,7 +34,13 @@ impl InferenceService {
         prompt: String,
         cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
     ) -> tokio::sync::mpsc::Receiver<String> {
-        self.mistral_reasoning.generate_stream(prompt, cancel)
+        if let Some(service) = &self.mistral_reasoning {
+            service.generate_stream(prompt, cancel)
+        } else if let Some(service) = &self.ministral8_b {
+            service.generate_stream(prompt, cancel)
+        } else {
+            panic!("No Mistral service loaded");
+        }
     }
 
     pub async fn generate_completion(
@@ -43,6 +48,12 @@ impl InferenceService {
         prompt: String,
         cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
     ) -> anyhow::Result<String> {
-        self.mistral_reasoning.generate_completion(prompt, cancel).await
+        if let Some(service) = &self.mistral_reasoning {
+            service.generate_completion(prompt, cancel).await
+        } else if let Some(service) = &self.ministral8_b {
+            service.generate_completion(prompt, cancel).await
+        } else {
+            anyhow::bail!("No Mistral service loaded");
+        }
     }
 }

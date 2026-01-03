@@ -1,4 +1,5 @@
 use crate::classifier::routing::ReasoningProfile;
+use tracing::debug;
 use once_cell::sync::Lazy;
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -88,4 +89,135 @@ pub fn resolved_prompt_key(intent: &str, profile: Option<ReasoningProfile>) -> S
 
 pub fn chat_layer_engagement_hint() -> &'static str {
     CHAT_LAYER_ENGAGEMENT_HINT
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum Tone {
+    Casual,
+    Supportive,
+    Neutral,
+    Formal,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum Depth {
+    Shallow,
+    Medium,
+    Deep,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum Initiative {
+    Reactive,
+    Suggestive,
+    Proactive,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum Constraint {
+    ExplainSteps,
+}
+
+#[derive(Clone, Debug)]
+pub struct PromptPlan {
+    pub base_prompt: String,
+    pub tone: Tone,
+    pub depth: Depth,
+    pub initiative: Initiative,
+    pub constraints: Vec<Constraint>,
+}
+
+pub fn build_prompt_plan(
+    routing: &crate::classifier::routing::IntentRoutingResult,
+) -> PromptPlan {
+    let mut base_prompt = routing.prompt_key.clone();
+
+    // Domain overrides ensure technical content always lands in safe prompts.
+    match routing.domain.label.as_str() {
+        "technical" => base_prompt = "reasoning".into(),
+        "legal" => base_prompt = "advice_practical".into(),
+        _ => {}
+    }
+
+    // Tone is primarily influenced by the speech act.
+    let tone = match routing.speech_act.label.as_str() {
+        "DIRECTING" => Tone::Supportive,
+        "ASKING" => Tone::Neutral,
+        "COLLABORATIVE" | "SOCIAL" | "SHARING" => Tone::Casual,
+        _ => Tone::Casual,
+    };
+
+    // Depth aligns with expectation and domain.
+    let depth = if routing.domain.label == "technical" {
+        Depth::Deep
+    } else {
+        match routing.expectation.label.as_str() {
+            "ADVICE" => Depth::Medium,
+            "INFO" => Depth::Medium,
+            _ => Depth::Shallow,
+        }
+    };
+
+    let initiative = match routing.speech_act.label.as_str() {
+        "DIRECTING" => Initiative::Suggestive,
+        "COLLABORATIVE" => Initiative::Proactive,
+        "ASKING" => Initiative::Reactive,
+        _ => Initiative::Reactive,
+    };
+
+    let mut constraints = Vec::new();
+    if routing.domain.label == "technical"
+        || base_prompt.as_str() == "reasoning"
+        || matches!(routing.final_intent_kind, crate::classifier::routing::IntentKind::Reasoning)
+    {
+        constraints.push(Constraint::ExplainSteps);
+    }
+
+    PromptPlan {
+        base_prompt,
+        tone,
+        depth,
+        initiative,
+        constraints,
+    }
+}
+
+pub fn render_prompt(plan: &PromptPlan, language: Option<&str>) -> String {
+    let mut prompt = prompt_for_intent(plan.base_prompt.as_str(), language);
+
+    match plan.tone {
+        Tone::Supportive => prompt.push_str("\nBe supportive and encouraging."),
+        Tone::Formal => prompt.push_str("\nUse precise, professional language."),
+        Tone::Neutral => prompt.push_str("\nMaintain an even, balanced tone."),
+        Tone::Casual => prompt.push_str("\nKeep the tone relaxed and friendly."),
+    }
+
+    match plan.depth {
+        Depth::Deep => prompt.push_str("\nProvide detailed reasoning and context."),
+        Depth::Medium => prompt.push_str("\nOffer a moderate level of detail."),
+        Depth::Shallow => prompt.push_str("\nKeep responses concise."),
+    }
+
+    match plan.initiative {
+        Initiative::Proactive => prompt.push_str("\nOffer proactive suggestions when appropriate."),
+        Initiative::Suggestive => prompt.push_str("\nSuggest next steps when it helps."),
+        Initiative::Reactive => prompt.push_str("\nRespond directly to the user input."),
+    }
+
+    for constraint in &plan.constraints {
+        match constraint {
+            Constraint::ExplainSteps => prompt.push_str("\nExplain your reasoning step by step."),
+        }
+    }
+
+    debug!(
+        base = plan.base_prompt,
+        tone = ?plan.tone,
+        depth = ?plan.depth,
+        initiative = ?plan.initiative,
+        constraints = ?plan.constraints,
+        "rendered prompt plan"
+    );
+
+    prompt
 }

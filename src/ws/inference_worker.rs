@@ -1,5 +1,4 @@
 use axum::extract::ws::Message as WsMessage;
-use serde_json::json;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -28,11 +27,6 @@ pub struct InferenceWorker {
     tx: mpsc::Sender<InferenceJob>,
 }
 
-#[derive(serde::Deserialize, Debug)]
-struct SummaryJson {
-    summary: String,
-}
-
 impl InferenceWorker {
     pub fn new(queue_size: usize) -> Self {
         let (tx, rx) = mpsc::channel(queue_size);
@@ -53,30 +47,6 @@ impl InferenceWorker {
         job: InferenceJob,
     ) -> Result<(), mpsc::error::SendError<InferenceJob>> {
         self.tx.send(job).await
-    }
-}
-
-fn blackhole_ws_sender() -> mpsc::Sender<WsMessage> {
-    let (tx, mut rx) = mpsc::channel(8);
-
-    tokio::spawn(async move {
-        while rx.recv().await.is_some() {
-            // intentionally discard
-        }
-    });
-
-    tx
-}
-
-pub fn warmup_job(infer: Arc<InferenceService>, db: Arc<DBLayer>) -> InferenceJob {
-    InferenceJob {
-        prompt: "Hello".to_string(), // minimal token path
-        chat_id: "__warmup__".into(),
-        session_id: "__warmup__".into(),
-        sender: blackhole_ws_sender(),
-        infer,
-        db,
-        cancel: Arc::new(AtomicBool::new(false)),
     }
 }
 
@@ -106,8 +76,6 @@ async fn process_job(job: InferenceJob) {
         return;
     }
 
-    let is_warmup = job.chat_id == "__warmup__";
-
     info!(
         chat_id = job.chat_id.as_str(),
         session_id = job.session_id.as_str(),
@@ -122,10 +90,6 @@ async fn process_job(job: InferenceJob) {
     let mut assistant_reply = String::new();
 
     while let Some(token) = stream.recv().await {
-        if is_warmup {
-            break; // first token is enough
-        }
-
         if token.contains("<|im_end|>") {
             break;
         }
@@ -196,14 +160,17 @@ async fn process_job(job: InferenceJob) {
     if should_generate_summary(&history) {
         debug!("summary triggered for chat {}", job.chat_id);
 
+        let history_snapshot = history.clone();
         tokio::spawn({
             let db = job.db.clone();
-            let infer = job.infer.clone();
             let chat_id = job.chat_id.clone();
             let ws_tx = job.sender.clone();
+            let history_data = history_snapshot;
 
             async move {
-                if let Err(e) = generate_summary_message(db, infer, chat_id, ws_tx).await {
+                if let Err(e) =
+                    generate_summary_message(db, chat_id, ws_tx, history_data).await
+                {
                     eprintln!("summary generation failed: {e}");
                 }
             }
@@ -227,69 +194,36 @@ async fn process_job(job: InferenceJob) {
 
 pub async fn generate_summary_message(
     db: Arc<DBLayer>,
-    infer: Arc<InferenceService>,
     chat_id: String,
     ws_tx: mpsc::Sender<WsMessage>,
+    history: Vec<Message>,
 ) -> anyhow::Result<()> {
-    let history = db
-        .list_messages_for_chat(&chat_id)
-        .await
-        .unwrap_or_default();
-
-    // Prevent duplicates
     if history.iter().any(|m| m.role == "summary") {
         return Ok(());
     }
 
     let user_messages: Vec<&Message> = history.iter().filter(|m| m.role == "user").collect();
 
-    // Extract ONLY first few user messages
-    let text = user_messages
+    let text_snippets = history
         .iter()
-        .take(3)
         .filter_map(|m| m.text.as_ref())
+        .take(4)
         .cloned()
         .collect::<Vec<_>>()
         .join("\n");
 
-    if text.trim().is_empty() {
+    if text_snippets.trim().is_empty() {
         return Ok(());
     }
 
-    // NEW: Phi summarizer with strict JSON output and fallback.
     let language_hint = user_messages
         .iter()
         .filter_map(|m| m.language.as_deref())
         .find(|lang| !lang.trim().is_empty());
 
     let normalized_lang = language_hint.and_then(|lang| normalize_language_code(lang));
-    let language_instruction = normalized_lang
-        .as_deref()
-        .map(|code| {
-            format!(
-                "- The \"summary\" value must be written in {}.",
-                language_display_name(code)
-            )
-        })
-        .unwrap_or_else(|| "- The \"summary\" value must be written in English.".to_string());
+    let summary = normalize_summary(&text_snippets);
 
-    let prompt = format!(
-        r#"You output ONLY valid JSON with a single field "summary".
-- Summarize the user's request in at most 3 lower-case words.
-- Use short, meaningful keywords without punctuation.
-- If the intent is unclear or generic, set "summary" to "general request".
-{language_instruction}
-Text to summarize:
-{text}
-JSON:"#,
-        text = text,
-        language_instruction = language_instruction
-    );
-
-    let summary_raw = infer.phi.generate_with_prompt(&prompt, 64).await?;
-    let summary = extract_summary(&summary_raw);
-
-    // Save summary message
     let msg = Message {
         id: Uuid::new_v4().to_string(),
         chat_id: chat_id.clone(),
@@ -307,8 +241,7 @@ JSON:"#,
     db.save_message(&msg).await?;
     let _ = touch_chat(&db, &chat_id, None).await;
 
-    // Send to UI
-    let summary_msg = json!({
+    let summary_msg = serde_json::json!({
         "type": "summary",
         "chat_id": chat_id,
         "message_id": msg.id,
@@ -323,33 +256,6 @@ JSON:"#,
         .await;
 
     Ok(())
-}
-
-fn extract_summary(raw: &str) -> String {
-    if let Some(summary) = parse_summary_json(raw) {
-        return summary;
-    }
-
-    normalize_summary(raw)
-}
-
-fn parse_summary_json(raw: &str) -> Option<String> {
-    let trimmed = raw.trim();
-
-    if let Ok(obj) = serde_json::from_str::<SummaryJson>(trimmed) {
-        return Some(normalize_summary(&obj.summary));
-    }
-
-    let start = trimmed.find('{')?;
-    let end = trimmed.rfind('}')?;
-    if end <= start {
-        return None;
-    }
-
-    let slice = &trimmed[start..=end];
-    serde_json::from_str::<SummaryJson>(slice)
-        .map(|obj| normalize_summary(&obj.summary))
-        .ok()
 }
 
 fn normalize_summary(text: &str) -> String {
@@ -381,18 +287,5 @@ fn normalize_language_code(raw: &str) -> Option<String> {
         None
     } else {
         Some(normalized)
-    }
-}
-
-fn language_display_name(code: &str) -> String {
-    match code {
-        "es" => "Spanish".to_string(),
-        "pt" => "Portuguese".to_string(),
-        "ru" => "Russian".to_string(),
-        "fr" => "French".to_string(),
-        "de" => "German".to_string(),
-        "it" => "Italian".to_string(),
-        "en" => "English".to_string(),
-        _ => code.to_string(),
     }
 }

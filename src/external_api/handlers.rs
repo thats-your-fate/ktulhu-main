@@ -113,15 +113,8 @@ pub async fn generate(
     }
 
     let request_id = Uuid::new_v4().to_string();
-    let intent = payload
-        .intent
-        .clone()
-        .unwrap_or_else(|| prompts::default_intent().to_string());
 
-    let system_prompt = payload
-        .system_prompt
-        .clone()
-        .unwrap_or_else(|| prompts::prompt_for_intent(&intent, payload.language.as_deref()));
+    let system_prompt = payload.system_prompt.clone();
 
     let mut history = Vec::with_capacity(1);
     history.push(Message {
@@ -138,7 +131,7 @@ pub async fn generate(
         ts: Utc::now().timestamp(),
     });
 
-    let chatml_prompt = build_mistral_prompt(&history, Some(&system_prompt));
+    let chatml_prompt = build_mistral_prompt(&history, system_prompt.as_deref());
     let cancel = Arc::new(AtomicBool::new(false));
     let raw = state
         .infer
@@ -163,7 +156,7 @@ pub async fn generate(
         request_id,
         user_id,
         role: user.role.clone(),
-        system_prompt,
+        system_prompt: system_prompt.unwrap_or_default(),
         output: cleaned,
         generation_count: user.generation_count,
         generation_limit: user.generation_limit(),

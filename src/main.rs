@@ -4,29 +4,21 @@ use axum::{
     http::{header::AUTHORIZATION, header::CONTENT_TYPE, HeaderName, HeaderValue, Method},
     Router,
 };
+use dotenvy::dotenv;
 use tokio::net::TcpListener;
 use tower_http::cors::{AllowHeaders, AllowMethods, AllowOrigin, CorsLayer};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
-use dotenvy::dotenv;
-
-mod attachments;
-mod auth;
-mod classifier;
-mod conversation;
-mod db;
-mod external_api;
-mod inference;
-mod internal_api;
-mod manager;
-mod model;
-mod payment;
-mod prompts;
-mod ws;
-
-use db::DBLayer;
-use manager::ModelManager;
-use ws::{inference_worker::warmup_job, AppState, InferenceWorker};
+use ktulhuMain::{
+    auth, external_api,
+    inference::InferenceService,
+    internal_api,
+    payment::{self, PaymentService},
+};
+use ktulhuMain::inference::roberta_classifier::logits_argmax;
+use ktulhuMain::db::DBLayer;
+use ktulhuMain::manager::ModelManager;
+use ktulhuMain::ws::{self, AppState, InferenceWorker};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -35,6 +27,7 @@ async fn main() -> anyhow::Result<()> {
     // -----------------------------------
     dotenv().ok();
     dotenvy::from_filename("config/payment.env").ok();
+    dotenvy::from_filename("config/llamacpp.env").ok();
 
     // -----------------------------------
     // Logging
@@ -74,27 +67,32 @@ async fn main() -> anyhow::Result<()> {
     // -----------------------------------
     let models = Arc::new(ModelManager::new().await?);
 
-    println!("5️⃣ Sanity check (what you asked for)");
-    let test = models.roberta.embed("machine learning is cool").await?;
-    println!(
-        "🧪 embedding check → dim={} norm={:.4}",
-        test.len(),
-        test.iter().map(|x| x * x).sum::<f32>().sqrt()
-    );
+    println!("5️⃣ Sanity check (classifier quick pass)");
+    match models
+        .roberta
+        .classify("machine learning is cool")
+        .and_then(|out| {
+            let (speech_idx, _) = logits_argmax(&out.speech_act)?;
+            let (expect_idx, _) = logits_argmax(&out.expectation)?;
+            Ok((speech_idx, expect_idx))
+        }) {
+        Ok((speech, expect)) => {
+            println!("🧪 classifier check → speech_act={} expectation={}", speech, expect);
+        }
+        Err(err) => {
+            println!("⚠️  classifier sanity check failed: {err}");
+        }
+    }
 
     // -----------------------------------
     // Unified inference service
     // -----------------------------------
-    let infer = Arc::new(crate::inference::InferenceService::new(
-        models.mistral_reasoning.clone(),
-        models.mistral8_b.clone(),
-        models.phi.clone(),
-    ));
+    let infer = Arc::new(InferenceService::new(models.mistral_llama.clone()));
 
     // -----------------------------------
     // Optional payment service (Stripe)
     // -----------------------------------
-    let payment_service = payment::PaymentService::from_env();
+    let payment_service = PaymentService::from_env();
     if payment_service.is_some() {
         println!("💳 Stripe checkout enabled via /payment/create-checkout-session");
     } else {
@@ -105,23 +103,6 @@ async fn main() -> anyhow::Result<()> {
     // WebSocket inference worker
     // -----------------------------------
     let worker = InferenceWorker::new(16);
-
-    // -----------------------------------
-    // 🔥 Warm up inference worker
-    // -----------------------------------
-    {
-        let infer = infer.clone();
-        let db = db.clone();
-        let worker_clone = worker.clone();
-
-        tokio::spawn(async move {
-            println!("🔥 Warming up inference worker…");
-
-            if let Err(e) = worker_clone.enqueue(warmup_job(infer, db)).await {
-                eprintln!("warmup enqueue failed: {e}");
-            }
-        });
-    }
 
     // -----------------------------------
     // Global AppState

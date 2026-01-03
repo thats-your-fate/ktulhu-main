@@ -18,9 +18,10 @@ use crate::manager::ModelManager;
 use crate::model::chat::Chat;
 use crate::model::message::{Message, MessageAttachment};
 use crate::payment::PaymentService;
+use crate::prompts;
 use crate::ws::inference_worker::{InferenceJob, InferenceWorker};
 use anyhow::anyhow;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 use uuid::Uuid;
 // ------------------------------------------------------------
 // TYPES
@@ -117,17 +118,19 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
 
                 tokio::task::yield_now().await;
 
-                info!(
-                    chat_id = parsed.chat_id.as_str(),
-                    session_id = parsed.session_id.as_str(),
-                    request_id = parsed.request_id.as_str(),
-                    msg_type = ?parsed.msg_type,
-                    device_hash = parsed.device_hash.as_str(),
-                    language = parsed.language.as_deref().unwrap_or(""),
-                    attachments = parsed.attachments.len(),
-                    text = parsed.text.as_str(),
-                    "incoming ws message"
-                );
+                if !matches!(parsed.msg_type, MsgType::Register) {
+                    info!(
+                        chat_id = parsed.chat_id.as_str(),
+                        session_id = parsed.session_id.as_str(),
+                        request_id = parsed.request_id.as_str(),
+                        msg_type = ?parsed.msg_type,
+                        device_hash = parsed.device_hash.as_str(),
+                        language = parsed.language.as_deref().unwrap_or(""),
+                        attachments = parsed.attachments.len(),
+                        text = parsed.text.as_str(),
+                        "incoming ws message"
+                    );
+                }
 
                 match parsed.msg_type {
                     MsgType::Register => {
@@ -210,10 +213,11 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                 crate::classifier::routing::IntentRoutingResult::default()
                             }
                         };
+                        let prompt_plan = prompts::build_prompt_plan(&routing_result);
+                        let rendered_system_prompt =
+                            prompts::render_prompt(&prompt_plan, parsed.language.as_deref());
 
                         let routing_language = routing_result.language.clone();
-                        let intent = routing_result.intent.clone();
-                        let intent_confidence = routing_result.confidence;
 
                         let decision_chain = if routing_result.notes.is_empty() {
                             "n/a".to_string()
@@ -223,12 +227,13 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                         info!(
                             chat_id = parsed.chat_id.as_str(),
                             request_id = parsed.request_id.as_str(),
-                            intent = intent.as_str(),
-                            intent_confidence,
+                            speech_act = routing_result.speech_act.label.as_str(),
+                            domain = routing_result.domain.label.as_str(),
+                            expectation = routing_result.expectation.label.as_str(),
                             routing_language = routing_result.language.as_str(),
                             prompt_key = routing_result.prompt_key.as_str(),
-                            routing_path = ?routing_result.path,
-                            intent_kind = ?routing_result.intent_kind,
+                            routing_path = ?routing_result.routing_path,
+                            intent_kind = ?routing_result.final_intent_kind,
                             chain = decision_chain.as_str(),
                             "intent decision summary"
                         );
@@ -329,25 +334,34 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                             ts: chrono::Utc::now().timestamp(),
                         };
 
+                        if matches!(history.last().map(|m| m.role.as_str()), Some("user")) {
+                            if let Some(removed) = history.pop() {
+                                if let Err(err) =
+                                    state.db.delete_message(&chat_id, &removed.id).await
+                                {
+                                    warn!(
+                                        chat_id = chat_id.as_str(),
+                                        message_id = removed.id.as_str(),
+                                        "failed to delete duplicate user message: {err}"
+                                    );
+                                }
+                            }
+                        }
+
                         history.push(user_msg.clone());
 
                         // Trim long histories
                         history = trim_history(history, 24);
 
                         // Build Mistral prompt
-                        let mut system_prompt = crate::prompts::prompt_for_intent(
-                            routing_result.prompt_key.as_str(),
-                            Some(routing_language.as_str()),
+                        let base_prompt =
+                            build_ministral_prompt(&history, Some(&rendered_system_prompt));
+                        info!(
+                            chat_id = parsed.chat_id.as_str(),
+                            session_id = parsed.session_id.as_str(),
+                            prompt = rendered_system_prompt.as_str(),
+                            "rendered system prompt"
                         );
-                        if crate::classifier::routing::is_chat_followup_intent(
-                            routing_result.intent.as_str(),
-                        ) {
-                            system_prompt.push_str("\n\n");
-                            system_prompt
-                                .push_str(crate::prompts::chat_layer_engagement_hint());
-                        }
-
-                        let base_prompt = build_ministral_prompt(&history, Some(&system_prompt));
 
                         // Save user message
                         if let Err(err) = state.db.save_message(&user_msg).await {

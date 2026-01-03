@@ -1,68 +1,33 @@
-mod chat_layer;
-mod labels;
-mod layer1;
-mod task_layer;
-
 use anyhow::Result;
-use serde::{Deserialize, Serialize};
+use candle_core::Tensor;
+use serde::Serialize;
+use tracing::info;
 
-use crate::{manager::ModelManager, prompts};
+use crate::{
+    inference::roberta_classifier::logits_argmax,
+    manager::ModelManager,
+    prompts,
+};
 
-use chat_layer::run_chat_layer;
-use labels::routing_labels;
-use layer1::run_layer1;
-use task_layer::run_task_layer;
+const SPEECH_ACT_LABELS: &[&str] = &["SOCIAL", "SHARING", "ASKING", "DIRECTING", "OTHER"];
+const DOMAIN_LABELS: &[&str] = &["technical", "personal", "social", "legal", "other"];
+const EXPECTATION_LABELS: &[&str] = &["NONE", "INFO", "ADVICE", "ACTION", "OTHER"];
 
-const MULTI_INTENT_MIN_LEN: usize = 40;
-
-#[derive(Debug, Clone, Copy, Serialize, PartialEq)]
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 pub enum IntentKind {
     ChatCasual,
     Task,
     Reasoning,
 }
 
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 pub enum RoutingPath {
     EmptyInput,
-    MultiIntent,
-    TaskLayer,
     ChatLayer,
+    TaskLayer,
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct IntentRoutingResult {
-    pub intent: String,
-    pub confidence: f32,
-    pub multi_intent: bool,
-    pub clarification_needed: bool,
-    pub notes: Vec<String>,
-    pub language: String,
-    pub intent_kind: IntentKind,
-    pub prompt_key: String,
-    pub path: RoutingPath,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub reasoning_profile: Option<ReasoningProfile>,
-}
-
-impl Default for IntentRoutingResult {
-    fn default() -> Self {
-        Self {
-            intent: prompts::default_intent().to_string(),
-            confidence: 0.0,
-            multi_intent: false,
-            clarification_needed: false,
-            notes: Vec::new(),
-            language: "en".to_string(),
-            intent_kind: IntentKind::ChatCasual,
-            prompt_key: prompts::default_intent().to_string(),
-            path: RoutingPath::ChatLayer,
-            reasoning_profile: None,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub enum ReasoningProfile {
     General,
     ReflectiveAnalysis,
@@ -76,147 +41,217 @@ pub enum ReasoningProfile {
     RiddleMetaphor,
 }
 
-pub fn select_reasoning_profile(
-    _text: &str,
-    _language: Option<&str>,
-    intent: &str,
-    _intent_kind: IntentKind,
-) -> ReasoningProfile {
-    profile_from_intent(intent)
+#[derive(Debug, Clone, Serialize)]
+pub struct LabelDecision {
+    pub label: String,
+    pub confidence: f32,
 }
 
-pub fn profile_from_intent(intent: &str) -> ReasoningProfile {
-    if intent == "regulated_tax_legal" {
-        ReasoningProfile::RegulatedTaxLegal
-    } else {
-        ReasoningProfile::General
+impl LabelDecision {
+    fn new(label: impl Into<String>, confidence: f32) -> Self {
+        Self {
+            label: label.into(),
+            confidence,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct IntentRoutingResult {
+    pub language: String,
+    pub speech_act: LabelDecision,
+    pub domain: LabelDecision,
+    pub expectation: LabelDecision,
+    pub final_intent_kind: IntentKind,
+    pub routing_path: RoutingPath,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_profile: Option<ReasoningProfile>,
+    pub prompt_key: String,
+    pub notes: Vec<String>,
+}
+
+impl Default for IntentRoutingResult {
+    fn default() -> Self {
+        Self {
+            language: "en".to_string(),
+            speech_act: LabelDecision::new("SOCIAL", 1.0),
+            domain: LabelDecision::new("chat", 1.0),
+            expectation: LabelDecision::new("NONE", 1.0),
+            final_intent_kind: IntentKind::ChatCasual,
+            routing_path: RoutingPath::ChatLayer,
+            reasoning_profile: None,
+            prompt_key: prompts::default_intent().to_string(),
+            notes: vec!["default routing result".into()],
+        }
     }
 }
 
 pub async fn route_intent(
     models: &ModelManager,
     text: &str,
-    language: Option<&str>,
+    language_hint: Option<&str>,
 ) -> Result<IntentRoutingResult> {
     let trimmed = text.trim();
     let mut result = IntentRoutingResult::default();
-
-    let resolved_language = normalize_language(language);
-    result.language = resolved_language.clone();
-    let label_set = routing_labels(language);
+    result.language = normalize_language(language_hint);
+    result.notes.clear();
 
     if trimmed.is_empty() {
-        result.notes.push("empty input".into());
-        result.path = RoutingPath::EmptyInput;
-        result.prompt_key =
-            prompts::resolved_prompt_key(result.intent.as_str(), result.reasoning_profile);
-        return Ok(result);
-    }
-
-    let mut notes = Vec::new();
-
-    if trimmed.chars().count() <= 20 {
-        result.intent = "chat_casual".into();
-        result.intent_kind = IntentKind::ChatCasual;
-        result.confidence = 1.0;
-        result.path = RoutingPath::ChatLayer;
-        notes.push("short message → chat_casual".into());
-        result.notes = notes;
-        result.prompt_key =
-            prompts::resolved_prompt_key(result.intent.as_str(), result.reasoning_profile);
+        result.routing_path = RoutingPath::EmptyInput;
+        result.notes
+            .push("empty input → default chat behavior".into());
+        info!(?result, "routing pipeline result");
         return Ok(result);
     }
 
     let utterances = split_into_utterances(trimmed);
-    let multi_intent = utterances
-        .iter()
-        .filter(|u| u.chars().count() >= MULTI_INTENT_MIN_LEN)
-        .count()
-        > 1;
-
-    if multi_intent {
-        result.multi_intent = true;
-        notes.push("multiple significant utterances detected".into());
-        result.path = RoutingPath::MultiIntent;
-        result.notes = notes;
-        result.prompt_key =
-            prompts::resolved_prompt_key(result.intent.as_str(), result.reasoning_profile);
-        return Ok(result);
+    if has_multi_intent(&utterances) {
+        result
+            .notes
+            .push("multiple significant utterances detected".into());
     }
-
     let classify_input = utterances
         .first()
         .cloned()
         .unwrap_or_else(|| trimmed.to_string());
 
-    let layer1_decision = run_layer1(models, &classify_input, label_set).await?;
-    notes.push(format!(
-        "layer1 {label} ({conf:.2}) → {display}",
-        label = layer1_decision.label.as_str(),
-        conf = layer1_decision.confidence,
-        display = layer1_decision.display.as_str()
-    ));
-
-    let mut force_chat_layer = false;
-    if !layer1_decision.actionable {
-        notes.push("low actionability → chat_casual".into());
-        result.reasoning_profile = None;
-        force_chat_layer = true;
+    let (gate_idx, gate_conf) = models.phatic_gate.classify(&classify_input)?;
+    let gate_label = match gate_idx {
+        0 => "CONTENTFUL",
+        1 => "PHATIC",
+        _ => "UNKNOWN",
+    };
+    result
+        .notes
+        .push(format!("phatic_gate={gate_label} ({gate_conf:.2})"));
+    if gate_label == "PHATIC" && gate_conf > 0.8 {
+        result.speech_act = LabelDecision::new("SOCIAL", gate_conf);
+        result.domain = LabelDecision::new("social", gate_conf);
+        result.expectation = LabelDecision::new("NONE", gate_conf);
+        result.final_intent_kind = IntentKind::ChatCasual;
+        result.routing_path = RoutingPath::ChatLayer;
+        result.prompt_key = prompts::default_intent().to_string();
+        info!(?result, "routing pipeline result");
+        return Ok(result);
     }
 
-    let (mut intent, confidence, mut intent_kind, path) =
-        if !force_chat_layer && layer1_decision.enter_task_layer() {
-            let task_decision = run_task_layer(models, &classify_input, label_set).await?;
-            notes.push(format!(
-                "layer2 {label} ({conf:.2}) → {display}",
-                label = task_decision.label.as_str(),
-                conf = task_decision.confidence,
-                display = task_decision.display.as_str()
-            ));
-            if let Some(n) = task_decision.mapping_note {
-                notes.push(n.to_string());
-            }
-            (
-                task_decision.intent,
-                task_decision.confidence,
-                task_decision.intent_kind,
-                RoutingPath::TaskLayer,
-            )
-        } else {
-            let chat_decision = run_chat_layer(models, &classify_input, label_set).await?;
-            notes.push(format!(
-                "layer3 {label} ({conf:.2}) → {display}",
-                label = chat_decision.display.as_str(),
-                conf = chat_decision.confidence,
-                display = chat_decision.display.as_str()
-            ));
-            (
-                chat_decision.intent,
-                chat_decision.confidence,
-                chat_decision.intent_kind,
-                RoutingPath::ChatLayer,
-            )
-        };
+    let logits = models.roberta.classify(&classify_input)?;
+    let mut speech_act = decode_head(&logits.speech_act, SPEECH_ACT_LABELS)?;
+    speech_act.label = speech_act.label.to_ascii_uppercase();
+    let mut domain = decode_head(&logits.domain, DOMAIN_LABELS)?;
+    domain.label = domain.label.to_ascii_lowercase();
+    let mut expectation = decode_head(&logits.expectation, EXPECTATION_LABELS)?;
+    expectation.label = expectation.label.to_ascii_uppercase();
 
-    let mut reasoning_profile = select_reasoning_profile(
-        text,
-        Some(resolved_language.as_str()),
-        intent.as_str(),
-        intent_kind,
-    );
-    let prompt_key = prompts::resolved_prompt_key(intent.as_str(), Some(reasoning_profile));
-    notes.push(format!("routing path resolved → {:?}", path));
-    notes.push(format!("prompt slot resolved → {}", prompt_key));
+    result.notes.push(format!(
+        "speech_act={} ({:.2})",
+        speech_act.label.as_str(),
+        speech_act.confidence
+    ));
+    result.notes.push(format!(
+        "domain={} ({:.2})",
+        domain.label.as_str(),
+        domain.confidence
+    ));
+    result.notes.push(format!(
+        "expectation={} ({:.2})",
+        expectation.label.as_str(),
+        expectation.confidence
+    ));
 
-    result.intent = intent;
-    result.confidence = confidence;
-    result.notes = notes;
-    result.reasoning_profile = Some(reasoning_profile);
+    let (final_kind, routing_path, prompt_stub, mut routing_notes) =
+        resolve_routing(&speech_act.label, &expectation.label, &domain.label);
+    result.notes.append(&mut routing_notes);
+
+    let reasoning_profile = if routing_path == RoutingPath::TaskLayer {
+        Some(select_reasoning_profile(
+            text,
+            Some(result.language.as_str()),
+            prompt_stub,
+            final_kind,
+        ))
+    } else {
+        None
+    };
+
+    let mut prompt_key = prompts::resolved_prompt_key(prompt_stub, reasoning_profile);
+    if domain.label == "technical"
+        && prompt_key != "reasoning"
+        && prompt_key != "advice_practical"
+    {
+        result
+            .notes
+            .push("domain=technical → forcing reasoning prompt".into());
+        prompt_key = "reasoning".to_string();
+    }
+
+    result.speech_act = speech_act;
+    result.domain = domain;
+    result.expectation = expectation;
+    result.final_intent_kind = final_kind;
+    result.routing_path = routing_path;
+    result.reasoning_profile = reasoning_profile;
     result.prompt_key = prompt_key;
-    result.intent_kind = intent_kind;
-    result.path = path;
 
+    info!(?result, "routing pipeline result");
     Ok(result)
+}
+
+fn decode_head(logits: &Tensor, labels: &[&str]) -> Result<LabelDecision> {
+    let (idx, conf) = logits_argmax(logits)?;
+    let label = labels
+        .get(idx)
+        .copied()
+        .unwrap_or("unknown");
+    Ok(LabelDecision::new(label, conf))
+}
+
+fn resolve_routing(
+    speech_act: &str,
+    expectation: &str,
+    domain: &str,
+) -> (IntentKind, RoutingPath, &'static str, Vec<String>) {
+    let mut notes = Vec::new();
+    if speech_act == "DIRECTING" && expectation == "ADVICE" {
+        notes.push("DIRECTING + ADVICE expectation → task escalation".into());
+        let intent = intent_from_domain(domain);
+        let intent_kind = if intent == "reasoning" {
+            IntentKind::Reasoning
+        } else {
+            IntentKind::Task
+        };
+        return (intent_kind, RoutingPath::TaskLayer, intent, notes);
+    }
+
+    if speech_act == "DIRECTING" && expectation != "ADVICE" && domain == "technical" {
+        notes.push("DIRECTING + technical domain → reasoning depth".into());
+        return (
+            IntentKind::ChatCasual,
+            RoutingPath::ChatLayer,
+            "reasoning",
+            notes,
+        );
+    }
+
+    if speech_act == "COLLABORATIVE" {
+        notes.push("COLLABORATIVE/INITIATING → rapport handling".into());
+        let prompt = intent_from_domain(domain);
+        return (IntentKind::ChatCasual, RoutingPath::ChatLayer, prompt, notes);
+    }
+
+    notes.push("chat-first routing applied".into());
+    let prompt = intent_from_domain(domain);
+    (IntentKind::ChatCasual, RoutingPath::ChatLayer, prompt, notes)
+}
+
+fn intent_from_domain(domain: &str) -> &'static str {
+    match domain {
+        "technical" => "reasoning",
+        "legal" => "advice_practical",
+        "personal" => "opinion_reflective",
+        "social" => "chat_casual",
+        _ => "chat_casual",
+    }
 }
 
 fn normalize_language(language: Option<&str>) -> String {
@@ -267,14 +302,29 @@ fn push_segment(buffer: &mut String, segments: &mut Vec<String>) {
     buffer.clear();
 }
 
-pub fn is_chat_followup_intent(intent: &str) -> bool {
-    matches!(
-        intent,
-        "chat_casual"
-            | "task_short"
-            | "advice_practical"
-            | "opinion_reflective"
-            | "opinion_casual"
-            | "culture_context"
-    )
+fn has_multi_intent(utterances: &[String]) -> bool {
+    const MULTI_INTENT_MIN_LEN: usize = 40;
+    utterances
+        .iter()
+        .filter(|u| u.chars().count() >= MULTI_INTENT_MIN_LEN)
+        .count()
+        > 1
+}
+
+fn select_reasoning_profile(
+    _text: &str,
+    _language: Option<&str>,
+    intent: &str,
+    _intent_kind: IntentKind,
+) -> ReasoningProfile {
+    profile_from_intent(intent)
+}
+
+fn profile_from_intent(intent: &str) -> ReasoningProfile {
+    match intent {
+        "reasoning" => ReasoningProfile::General,
+        "regulated_tax_legal" => ReasoningProfile::RegulatedTaxLegal,
+        "opinion_reflective" => ReasoningProfile::ReflectiveAnalysis,
+        _ => ReasoningProfile::General,
+    }
 }

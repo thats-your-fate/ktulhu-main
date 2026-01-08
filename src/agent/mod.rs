@@ -36,9 +36,7 @@ pub async fn run_agent(llama: &LlamaCppService, goal: &str) -> Result<()> {
 
     for step in 0..state.max_steps {
         let prompt = build_prompt(goal, &state);
-        let output = llama
-            .generate_completion(prompt, cancel.clone())
-            .await?;
+        let output = llama.generate_completion(prompt, cancel.clone()).await?;
 
         let action = parse_action(output.trim())?;
 
@@ -89,10 +87,7 @@ fn parse_action(text: &str) -> Result<AgentAction> {
     let value: Value = serde_json::from_str(text)?;
 
     if let Some(final_msg) = value.get("final") {
-        let message = final_msg
-            .as_str()
-            .unwrap_or("")
-            .to_string();
+        let message = final_msg.as_str().unwrap_or("").to_string();
         return Ok(AgentAction::Final { message });
     }
 
@@ -144,10 +139,7 @@ fn parse_action(text: &str) -> Result<AgentAction> {
 fn execute_tool(tool: Tool) -> Result<String> {
     match tool {
         Tool::RunCmd { cmd } => {
-            let output = Command::new("sh")
-                .arg("-c")
-                .arg(&cmd)
-                .output()?;
+            let output = Command::new("sh").arg("-c").arg(&cmd).output()?;
             Ok(format!(
                 "status: {}\nstdout:\n{}\nstderr:\n{}",
                 output.status,

@@ -26,6 +26,7 @@ When both required paths resolve, `ModelManager` logs `⚙️ Using llama.cpp ba
 
 ## Classifier Paths
 
-- `PHATIC_MODEL_DIR`
-  - Optional override for the RoBERTa phatic gate checkpoint.
-  - Defaults (in order) to `models/roberta/out`, `models/roberta`, or `out` when the env var is not set and the directory exists.
+- `INTENT_ROUTER_DIR`
+  - Optional override for the multi-head RoBERTa intent router checkpoint (falls back to the legacy `PHATIC_MODEL_DIR` env var or `models/roberta1`).
+- `INTENT_ROUTER_PHATIC`
+  - Set to `0` when the checkpoint does not contain the optional phatic head.

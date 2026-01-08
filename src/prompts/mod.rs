@@ -1,8 +1,8 @@
 use crate::classifier::routing::ReasoningProfile;
-use tracing::debug;
 use once_cell::sync::Lazy;
 use serde::Deserialize;
 use std::collections::HashMap;
+use tracing::debug;
 
 const DEFAULT_INTENT: &str = "chat_casual";
 const CHAT_LAYER_ENGAGEMENT_HINT: &str =
@@ -61,16 +61,6 @@ pub fn default_intent() -> &'static str {
     DEFAULT_INTENT
 }
 
-fn reasoning_prompt_override(profile: ReasoningProfile) -> Option<&'static str> {
-    match profile {
-        ReasoningProfile::RegulatedTaxLegal => Some("reasoning_regulated"),
-        ReasoningProfile::RiddleMetaphor => Some("reasoning_riddle"),
-        ReasoningProfile::FormalLogic => Some("reasoning_formal_logic"),
-        ReasoningProfile::ReflectiveAnalysis => Some("reasoning_reflective_metaphor"),
-        _ => None,
-    }
-}
-
 pub fn prompt_for_intent(intent: &str, language: Option<&str>) -> String {
     let set = language_prompts(language);
     set.prompts
@@ -81,10 +71,19 @@ pub fn prompt_for_intent(intent: &str, language: Option<&str>) -> String {
 }
 
 pub fn resolved_prompt_key(intent: &str, profile: Option<ReasoningProfile>) -> String {
-    profile
-        .and_then(reasoning_prompt_override)
-        .unwrap_or(intent)
-        .to_string()
+    if matches!(
+        profile,
+        Some(
+            ReasoningProfile::RegulatedTaxLegal
+                | ReasoningProfile::RiddleMetaphor
+                | ReasoningProfile::FormalLogic
+                | ReasoningProfile::ReflectiveAnalysis
+        )
+    ) {
+        "reasoning".to_string()
+    } else {
+        intent.to_string()
+    }
 }
 
 pub fn chat_layer_engagement_hint() -> &'static str {
@@ -127,24 +126,45 @@ pub struct PromptPlan {
     pub constraints: Vec<Constraint>,
 }
 
-pub fn build_prompt_plan(
-    routing: &crate::classifier::routing::IntentRoutingResult,
-) -> PromptPlan {
+pub fn build_prompt_plan(routing: &crate::classifier::routing::IntentRoutingResult) -> PromptPlan {
     let mut base_prompt = routing.prompt_key.clone();
+
+    if routing.support_intent {
+        return PromptPlan {
+            base_prompt,
+            tone: Tone::Supportive,
+            depth: Depth::Shallow,
+            initiative: Initiative::Suggestive,
+            constraints: Vec::new(),
+        };
+    }
 
     // Domain overrides ensure technical content always lands in safe prompts.
     match routing.domain.label.as_str() {
-        "technical" => base_prompt = "reasoning".into(),
+        "technical"
+            if matches!(
+                routing.expectation.label.as_str(),
+                "INFO" | "ADVICE" | "ACTION"
+            ) =>
+        {
+            base_prompt = "reasoning".into()
+        }
         "legal" => base_prompt = "advice_practical".into(),
         _ => {}
     }
 
     // Tone is primarily influenced by the speech act.
-    let tone = match routing.speech_act.label.as_str() {
-        "DIRECTING" => Tone::Supportive,
-        "ASKING" => Tone::Neutral,
-        "COLLABORATIVE" | "SOCIAL" | "SHARING" => Tone::Casual,
-        _ => Tone::Casual,
+    let is_statement_like =
+        routing.expectation.label == "NONE" && routing.speech_act.label == "DIRECTING";
+    let tone = if is_statement_like {
+        Tone::Casual
+    } else {
+        match routing.speech_act.label.as_str() {
+            "DIRECTING" => Tone::Supportive,
+            "ASKING" => Tone::Neutral,
+            "COLLABORATIVE" | "SOCIAL" | "SHARING" => Tone::Casual,
+            _ => Tone::Casual,
+        }
     };
 
     // Depth aligns with expectation and domain.
@@ -168,7 +188,10 @@ pub fn build_prompt_plan(
     let mut constraints = Vec::new();
     if routing.domain.label == "technical"
         || base_prompt.as_str() == "reasoning"
-        || matches!(routing.final_intent_kind, crate::classifier::routing::IntentKind::Reasoning)
+        || matches!(
+            routing.final_intent_kind,
+            crate::classifier::routing::IntentKind::Reasoning
+        )
     {
         constraints.push(Constraint::ExplainSteps);
     }

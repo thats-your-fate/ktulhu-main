@@ -7,10 +7,7 @@ async fn main() -> Result<()> {
     dotenvy::dotenv().ok();
     dotenvy::from_filename("config/llamacpp.env").ok();
 
-    let goal = env::args()
-        .skip(1)
-        .collect::<Vec<_>>()
-        .join(" ");
+    let goal = env::args().skip(1).collect::<Vec<_>>().join(" ");
     let goal = if goal.trim().is_empty() {
         "Run tests and fix any failures".to_string()
     } else {

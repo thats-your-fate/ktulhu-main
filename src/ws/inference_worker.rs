@@ -168,9 +168,7 @@ async fn process_job(job: InferenceJob) {
             let history_data = history_snapshot;
 
             async move {
-                if let Err(e) =
-                    generate_summary_message(db, chat_id, ws_tx, history_data).await
-                {
+                if let Err(e) = generate_summary_message(db, chat_id, ws_tx, history_data).await {
                     eprintln!("summary generation failed: {e}");
                 }
             }

@@ -9,16 +9,16 @@ use tokio::net::TcpListener;
 use tower_http::cors::{AllowHeaders, AllowMethods, AllowOrigin, CorsLayer};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
+use ktulhuMain::db::DBLayer;
+use ktulhuMain::inference::intent_router::logits_argmax;
+use ktulhuMain::manager::ModelManager;
+use ktulhuMain::ws::{self, AppState, InferenceWorker};
 use ktulhuMain::{
     auth, external_api,
     inference::InferenceService,
     internal_api,
     payment::{self, PaymentService},
 };
-use ktulhuMain::inference::roberta_classifier::logits_argmax;
-use ktulhuMain::db::DBLayer;
-use ktulhuMain::manager::ModelManager;
-use ktulhuMain::ws::{self, AppState, InferenceWorker};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -69,7 +69,7 @@ async fn main() -> anyhow::Result<()> {
 
     println!("5️⃣ Sanity check (classifier quick pass)");
     match models
-        .roberta
+        .intent_router
         .classify("machine learning is cool")
         .and_then(|out| {
             let (speech_idx, _) = logits_argmax(&out.speech_act)?;
@@ -77,7 +77,10 @@ async fn main() -> anyhow::Result<()> {
             Ok((speech_idx, expect_idx))
         }) {
         Ok((speech, expect)) => {
-            println!("🧪 classifier check → speech_act={} expectation={}", speech, expect);
+            println!(
+                "🧪 classifier check → speech_act={} expectation={}",
+                speech, expect
+            );
         }
         Err(err) => {
             println!("⚠️  classifier sanity check failed: {err}");

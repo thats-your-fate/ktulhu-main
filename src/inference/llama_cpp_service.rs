@@ -98,8 +98,7 @@ impl LlamaCppService {
         model_params.n_gpu_layers = gpu_layers.unwrap_or(-1);
         model_params.use_mmap = true;
 
-        let model =
-            unsafe { ffi::llama_model_load_from_file(path_cstr.as_ptr(), model_params) };
+        let model = unsafe { ffi::llama_model_load_from_file(path_cstr.as_ptr(), model_params) };
         if model.is_null() {
             shutdown_backend();
             bail!("failed to load model from {}", path.display());
@@ -189,9 +188,7 @@ impl LlamaCppService {
         let (tx, rx) = mpsc::channel(128);
         let inner = self.inner.clone();
         tokio::task::spawn_blocking(move || {
-            if let Err(err) =
-                LlamaInner::run_with_guard(inner, &prompt, cancel, tx.clone())
-            {
+            if let Err(err) = LlamaInner::run_with_guard(inner, &prompt, cancel, tx.clone()) {
                 let _ = tx.blocking_send(format!("llama.cpp error: {err}"));
             }
         });
@@ -268,8 +265,7 @@ impl LlamaInner {
     }
 
     fn tokenize(&self, text: &str) -> Result<Vec<ffi::llama_token>> {
-        let mut buf =
-            vec![0 as ffi::llama_token; text.len().max(32)];
+        let mut buf = vec![0 as ffi::llama_token; text.len().max(32)];
         let bytes = text.as_bytes();
         let text_ptr = bytes.as_ptr() as *const c_char;
         loop {
@@ -303,27 +299,21 @@ impl LlamaInner {
             let chunk = &tokens[processed..processed + take];
             let mut batch = unsafe { ffi::llama_batch_init(self.n_batch, 0, 1) };
             unsafe {
-                let token_slice =
-                    std::slice::from_raw_parts_mut(batch.token, chunk.len());
+                let token_slice = std::slice::from_raw_parts_mut(batch.token, chunk.len());
                 token_slice.copy_from_slice(chunk);
 
-                let pos_slice =
-                    std::slice::from_raw_parts_mut(batch.pos, chunk.len());
+                let pos_slice = std::slice::from_raw_parts_mut(batch.pos, chunk.len());
                 for (i, slot) in pos_slice.iter_mut().enumerate() {
                     *slot = (self.n_past + i as i32) as ffi::llama_pos;
                 }
 
-                let n_seq_slice =
-                    std::slice::from_raw_parts_mut(batch.n_seq_id, chunk.len());
-                let seq_heads =
-                    std::slice::from_raw_parts_mut(batch.seq_id, chunk.len());
-                let logits_slice =
-                    std::slice::from_raw_parts_mut(batch.logits, chunk.len());
+                let n_seq_slice = std::slice::from_raw_parts_mut(batch.n_seq_id, chunk.len());
+                let seq_heads = std::slice::from_raw_parts_mut(batch.seq_id, chunk.len());
+                let logits_slice = std::slice::from_raw_parts_mut(batch.logits, chunk.len());
 
                 for i in 0..chunk.len() {
                     n_seq_slice[i] = 1;
-                    let seq_slot =
-                        std::slice::from_raw_parts_mut(seq_heads[i], 1);
+                    let seq_slot = std::slice::from_raw_parts_mut(seq_heads[i], 1);
                     seq_slot[0] = 0;
                     logits_slice[i] = if i == chunk.len() - 1 { 1 } else { 0 };
                 }
@@ -362,11 +352,7 @@ impl LlamaInner {
         }
     }
 
-    fn flush_pending(
-        &self,
-        pending: &mut Vec<u8>,
-        tx: &mpsc::Sender<String>,
-    ) -> Result<()> {
+    fn flush_pending(&self, pending: &mut Vec<u8>, tx: &mpsc::Sender<String>) -> Result<()> {
         loop {
             if pending.is_empty() {
                 return Ok(());
@@ -384,9 +370,8 @@ impl LlamaInner {
                 Err(err) => {
                     let valid_up_to = err.valid_up_to();
                     if valid_up_to > 0 {
-                        let chunk = unsafe {
-                            std::str::from_utf8_unchecked(&pending[..valid_up_to])
-                        };
+                        let chunk =
+                            unsafe { std::str::from_utf8_unchecked(&pending[..valid_up_to]) };
                         if !chunk.is_empty() && tx.blocking_send(chunk.to_string()).is_err() {
                             return Ok(());
                         }

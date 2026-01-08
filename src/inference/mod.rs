@@ -1,7 +1,6 @@
 pub mod byte_decoder;
+pub mod intent_router;
 pub mod llama_cpp_service;
-pub mod roberta_classifier;
-pub mod roberta_phatic_gate;
 
 use std::sync::Arc;
 

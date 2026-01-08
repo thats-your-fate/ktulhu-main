@@ -1,37 +1,33 @@
 use anyhow::{anyhow, Result};
 use std::{path::PathBuf, sync::Arc};
 
-use crate::inference::{
-    llama_cpp_service::LlamaCppService,
-    roberta_classifier::RobertaClassifier,
-    roberta_phatic_gate::RobertaPhaticGate,
-};
+use crate::inference::{intent_router::RobertaIntentRouter, llama_cpp_service::LlamaCppService};
 
 pub struct ModelManager {
     pub mistral_llama: Arc<LlamaCppService>,
-    pub roberta: Arc<RobertaClassifier>,
-    pub phatic_gate: Arc<RobertaPhaticGate>,
+    pub intent_router: Arc<RobertaIntentRouter>,
 }
 
 impl ModelManager {
     pub async fn new() -> Result<Self> {
-        let roberta_dir = PathBuf::from("/home/yaro/projects/ktulhu-main/models/roberta1");
+        let default_intent_router_dir =
+            PathBuf::from("/home/yaro/projects/ktulhu-main/models/robertaTunedHeads");
 
-        let env_llama_cli_bin = std::env::var("LLAMA_CLI_BIN").ok().filter(|s| !s.trim().is_empty());
-        let env_llama_cli_model =
-            std::env::var("LLAMA_CLI_MODEL").ok().filter(|s| !s.trim().is_empty());
+        let env_llama_cli_bin = std::env::var("LLAMA_CLI_BIN")
+            .ok()
+            .filter(|s| !s.trim().is_empty());
+        let env_llama_cli_model = std::env::var("LLAMA_CLI_MODEL")
+            .ok()
+            .filter(|s| !s.trim().is_empty());
 
         let default_llama_bin = PathBuf::from("llama.cpp/build/bin/llama-cli");
-        let llama_cli_bin_path = env_llama_cli_bin
-            .as_deref()
-            .map(PathBuf::from)
-            .or_else(|| {
-                if default_llama_bin.exists() {
-                    Some(default_llama_bin.clone())
-                } else {
-                    None
-                }
-            });
+        let llama_cli_bin_path = env_llama_cli_bin.as_deref().map(PathBuf::from).or_else(|| {
+            if default_llama_bin.exists() {
+                Some(default_llama_bin.clone())
+            } else {
+                None
+            }
+        });
         if env_llama_cli_bin.is_none() {
             match &llama_cli_bin_path {
                 Some(path) => println!(
@@ -53,15 +49,16 @@ impl ModelManager {
                 "models/Ministral3-14B-Resoning-gguf/Ministral-3-14B-Reasoning-2512-Q8_0.gguf",
             ),
         ];
-        let llama_cli_model_path = env_llama_cli_model
-            .as_deref()
-            .map(PathBuf::from)
-            .or_else(|| {
-                llama_cli_model_candidates
-                    .iter()
-                    .find(|p| p.exists())
-                    .cloned()
-            });
+        let llama_cli_model_path =
+            env_llama_cli_model
+                .as_deref()
+                .map(PathBuf::from)
+                .or_else(|| {
+                    llama_cli_model_candidates
+                        .iter()
+                        .find(|p| p.exists())
+                        .cloned()
+                });
         if env_llama_cli_model.is_none() {
             match &llama_cli_model_path {
                 Some(path) => println!(
@@ -70,10 +67,7 @@ impl ModelManager {
                 ),
                 None => {
                     let default_dir = PathBuf::from("models/Ministral3-14B-Resoning-gguf");
-                    println!(
-                        "ℹ️  No GGUF detected in {}",
-                        default_dir.display()
-                    );
+                    println!("ℹ️  No GGUF detected in {}", default_dir.display());
                 }
             }
         }
@@ -123,68 +117,73 @@ impl ModelManager {
             }
         };
 
-        let classifier_dir = roberta_dir.clone();
-        let roberta = tokio::task::spawn_blocking(move || {
-            RobertaClassifier::load(classifier_dir, 0)
+        let env_intent_router_dir = std::env::var("INTENT_ROUTER_DIR")
+            .ok()
+            .filter(|s| !s.trim().is_empty());
+        let legacy_phatic_dir = if env_intent_router_dir.is_none() {
+            std::env::var("PHATIC_MODEL_DIR")
+                .ok()
+                .filter(|s| !s.trim().is_empty())
+        } else {
+            None
+        };
+        let (intent_router_dir, log_msg) = if let Some(dir) = env_intent_router_dir {
+            (PathBuf::from(&dir), format!("INTENT_ROUTER_DIR -> {}", dir))
+        } else if let Some(dir) = legacy_phatic_dir {
+            (
+                PathBuf::from(&dir),
+                format!("PHATIC_MODEL_DIR (legacy) -> {}", dir),
+            )
+        } else {
+            (
+                default_intent_router_dir.clone(),
+                format!(
+                    "INTENT_ROUTER_DIR not set – defaulting to {}",
+                    default_intent_router_dir.display()
+                ),
+            )
+        };
+        println!("ℹ️  {log_msg}");
+
+        let intent_router_dir = if intent_router_dir.exists() {
+            intent_router_dir
+        } else {
+            let fallback = intent_router_dir.join("out");
+            if fallback.exists() {
+                println!(
+                    "ℹ️  intent router directory missing, falling back to {}",
+                    fallback.display()
+                );
+                fallback
+            } else {
+                intent_router_dir
+            }
+        };
+
+        for required in ["tokenizer.json", "config.json", "model.safetensors"] {
+            if !intent_router_dir.join(required).exists() {
+                return Err(anyhow!(
+                    "{required} not found under {}",
+                    intent_router_dir.display()
+                ));
+            }
+        }
+
+        let use_phatic_head = std::env::var("INTENT_ROUTER_PHATIC")
+            .ok()
+            .map(|v| v != "0")
+            .unwrap_or(true);
+
+        let router_dir_clone = intent_router_dir.clone();
+        let intent_router = tokio::task::spawn_blocking(move || {
+            RobertaIntentRouter::load(router_dir_clone, 0, use_phatic_head)
         })
         .await??;
-        let roberta = Arc::new(roberta);
-
-        let env_phatic_dir =
-            std::env::var("PHATIC_MODEL_DIR").ok().filter(|s| !s.trim().is_empty());
-        let phatic_dir = env_phatic_dir
-            .as_deref()
-            .map(PathBuf::from)
-            .or_else(|| {
-                let candidate = PathBuf::from("/home/yaro/projects/ktulhu-main/models/roberta1/out");
-                if candidate.exists() {
-                    Some(candidate)
-                } else {
-                    None
-                }
-            })
-            .ok_or_else(|| {
-                anyhow!(
-                    "PHATIC_MODEL_DIR not configured and models/roberta/out was not found"
-                )
-            })?;
-        match env_phatic_dir {
-            Some(_) => println!("ℹ️  PHATIC_MODEL_DIR -> {}", phatic_dir.display()),
-            None => println!(
-                "ℹ️  PHATIC_MODEL_DIR not set – defaulting to {}",
-                phatic_dir.display()
-            ),
-        }
-
-        if !phatic_dir.join("tokenizer.json").exists() {
-            return Err(anyhow!(
-                "phatic gate tokenizer.json not found under {}",
-                phatic_dir.display()
-            ));
-        }
-        if !phatic_dir.join("config.json").exists() {
-            return Err(anyhow!(
-                "phatic gate config.json not found under {}",
-                phatic_dir.display()
-            ));
-        }
-        if !phatic_dir.join("model.safetensors").exists() {
-            return Err(anyhow!(
-                "phatic gate model.safetensors not found under {}",
-                phatic_dir.display()
-            ));
-        }
-
-        let phatic_gate = tokio::task::spawn_blocking(move || {
-            RobertaPhaticGate::load(phatic_dir, 0)
-        })
-        .await??;
-        let phatic_gate = Arc::new(phatic_gate);
+        let intent_router = Arc::new(intent_router);
 
         Ok(Self {
             mistral_llama,
-            roberta,
-            phatic_gate,
+            intent_router,
         })
     }
 }

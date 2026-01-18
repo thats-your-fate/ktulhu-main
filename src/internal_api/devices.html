@@ -1,0 +1,478 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>Devices · Ktulhu Admin</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+        :root {
+            font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+            background: #05060a;
+            color: #f5f7ff;
+        }
+        body {
+            margin: 0;
+            padding: 24px;
+        }
+        header,
+        nav {
+            display: flex;
+            flex-wrap: wrap;
+            justify-content: space-between;
+            align-items: center;
+            gap: 16px;
+            margin-bottom: 24px;
+        }
+        h1 {
+            margin: 0;
+            font-size: 1.5rem;
+        }
+        button {
+            background: #191a2d;
+            border: 1px solid #2d2f46;
+            color: inherit;
+            padding: 8px 12px;
+            border-radius: 6px;
+            cursor: pointer;
+        }
+        button:hover {
+            border-color: #6366f1;
+            color: #c7d2fe;
+        }
+        .admin-nav {
+            gap: 16px;
+            background: #111122;
+            border: 1px solid #1f2034;
+            border-radius: 10px;
+            padding: 12px 16px;
+            width: 100%;
+        }
+        .admin-nav strong {
+            font-size: 0.85rem;
+            letter-spacing: 0.05em;
+            color: #8a8cb5;
+            text-transform: uppercase;
+        }
+        .admin-nav-links {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            margin: 0;
+            padding: 0;
+            list-style: none;
+        }
+        .admin-nav-links a {
+            color: inherit;
+            text-decoration: none;
+            padding: 6px 10px;
+            border-radius: 6px;
+            background: #1a1a2c;
+            border: 1px solid #2f2f46;
+            font-size: 0.9rem;
+        }
+        .admin-nav-links a:hover {
+            border-color: #6366f1;
+            color: #c7d2fe;
+        }
+        .workspace {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+            gap: 16px;
+            align-items: start;
+        }
+        .panel {
+            background: #0e0f1a;
+            border: 1px solid #1b1c32;
+            border-radius: 10px;
+            padding: 16px;
+            min-height: 480px;
+        }
+        .panel h2 {
+            margin-top: 0;
+            font-size: 1rem;
+            color: #9ea4de;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 12px;
+            border: 1px solid #1b1c32;
+            border-radius: 10px;
+            overflow: hidden;
+            background: #0a0b15;
+        }
+        th, td {
+            padding: 10px 12px;
+            border-bottom: 1px solid #1b1c32;
+            text-align: left;
+            word-break: break-word;
+        }
+        th {
+            background: #13142a;
+            font-size: 0.8rem;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+            color: #8a8cb5;
+        }
+        tr:hover {
+            background: #161735;
+        }
+        .device-row,
+        .chat-row {
+            cursor: pointer;
+        }
+        .device-row.selected,
+        .chat-row.selected {
+            background: #2f2459;
+        }
+        .meta-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+            gap: 8px;
+            font-size: 0.85rem;
+        }
+        .meta-item span {
+            display: block;
+            color: #8a8cb5;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            font-size: 0.7rem;
+        }
+        .messages-panel {
+            max-height: 80vh;
+            overflow-y: auto;
+        }
+        .message-item {
+            padding: 10px 0;
+            border-bottom: 1px solid #1f2034;
+        }
+        .message-item:last-child {
+            border-bottom: none;
+        }
+        .message-meta {
+            font-size: 0.8rem;
+            color: #8a8cb5;
+            display: flex;
+            justify-content: space-between;
+            flex-wrap: wrap;
+            gap: 8px;
+        }
+        .message-text {
+            margin: 6px 0;
+            white-space: pre-wrap;
+            word-break: break-word;
+            overflow-wrap: anywhere;
+        }
+        .pill {
+            padding: 2px 8px;
+            border-radius: 999px;
+            font-size: 0.75rem;
+        }
+        .pill.assistant {
+            background: rgba(59, 130, 246, 0.2);
+            color: #93c5fd;
+        }
+        .pill.user {
+            background: rgba(16, 185, 129, 0.2);
+            color: #6ee7b7;
+        }
+        .pill.summary {
+            background: rgba(249, 115, 22, 0.2);
+            color: #fdba74;
+        }
+        .actions button {
+            margin-right: 6px;
+            font-size: 0.75rem;
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <h1>Device Explorer</h1>
+        <button id="refresh-devices">Refresh devices</button>
+    </header>
+
+    <nav class="admin-nav">
+        <strong>Admin Routes</strong>
+        <ul class="admin-nav-links" id="admin-route-list"></ul>
+    </nav>
+
+    <section class="workspace">
+        <div class="panel">
+            <h2>Devices</h2>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Device Hash</th>
+                        <th>User</th>
+                        <th>Last Seen</th>
+                    </tr>
+                </thead>
+                <tbody id="device-table-body">
+                    <tr><td colspan="3">Loading…</td></tr>
+                </tbody>
+            </table>
+        </div>
+
+        <div class="panel">
+            <h2>Chats <small id="selected-device-label">Select a device</small></h2>
+            <div class="meta-grid" id="device-meta">
+                <div class="meta-item">
+                    <span>User</span>
+                    <div id="meta-user">—</div>
+                </div>
+                <div class="meta-item">
+                    <span>Created</span>
+                    <div id="meta-created">—</div>
+                </div>
+                <div class="meta-item">
+                    <span>Last Seen</span>
+                    <div id="meta-last-seen">—</div>
+                </div>
+            </div>
+            <table style="margin-top:16px;">
+                <thead>
+                    <tr>
+                        <th>Chat ID</th>
+                        <th>Title</th>
+                        <th>Updated</th>
+                    </tr>
+                </thead>
+                <tbody id="chat-table-body">
+                    <tr><td colspan="3">Select a device</td></tr>
+                </tbody>
+            </table>
+        </div>
+
+        <div class="panel messages-panel" id="messages-panel">
+            <h2>Thread <small id="chat-label">—</small></h2>
+            <div id="message-list">Select a chat to inspect its messages.</div>
+        </div>
+    </section>
+
+    <script>
+        const adminRoutes = [
+            { label: 'Admin Overview', path: '/internal/admin' },
+            { label: 'Devices Explorer', path: '/internal/admin/devices' },
+            { label: 'Latest Raw Messages', path: '/internal/admin/last?limit=50' },
+            { label: 'User Management', path: '/internal/users' },
+        ];
+
+        const adminRouteList = document.getElementById('admin-route-list');
+        const refreshBtn = document.getElementById('refresh-devices');
+        const deviceTableBody = document.getElementById('device-table-body');
+        const chatTableBody = document.getElementById('chat-table-body');
+        const messageList = document.getElementById('message-list');
+        const deviceLabel = document.getElementById('selected-device-label');
+        const chatLabel = document.getElementById('chat-label');
+        const metaUser = document.getElementById('meta-user');
+        const metaCreated = document.getElementById('meta-created');
+        const metaLastSeen = document.getElementById('meta-last-seen');
+
+        let devices = [];
+        let selectedDeviceHash = null;
+        let selectedChatId = null;
+
+        refreshBtn.addEventListener('click', loadDevices);
+        renderAdminRoutes();
+        loadDevices();
+
+        async function loadDevices() {
+            deviceTableBody.innerHTML = '<tr><td colspan="3">Loading…</td></tr>';
+            try {
+                const res = await fetch('/internal/admin/devices/list');
+                const data = await res.json();
+                devices = data.devices || [];
+                renderDevices(devices);
+            } catch (err) {
+                console.error('devices', err);
+                deviceTableBody.innerHTML = '<tr><td colspan="3">Failed to load devices</td></tr>';
+            }
+        }
+
+        function renderDevices(list) {
+            if (!list.length) {
+                deviceTableBody.innerHTML = '<tr><td colspan="3">No devices available</td></tr>';
+                return;
+            }
+
+            deviceTableBody.innerHTML = '';
+            list.forEach(device => {
+                const tr = document.createElement('tr');
+                tr.className = 'device-row';
+                if (device.device_hash === selectedDeviceHash) {
+                    tr.classList.add('selected');
+                }
+                tr.innerHTML = `
+                    <td>${device.device_hash}</td>
+                    <td>${device.user_email ?? device.user_id}</td>
+                    <td>${formatTs(device.last_seen_ts)}</td>
+                `;
+                tr.addEventListener('click', () => selectDevice(device.device_hash));
+                deviceTableBody.appendChild(tr);
+            });
+        }
+
+        function selectDevice(deviceHash) {
+            if (selectedDeviceHash === deviceHash) return;
+            selectedDeviceHash = deviceHash;
+            selectedChatId = null;
+            highlightRows('.device-row', deviceHash);
+            updateDeviceMeta(deviceHash);
+            loadChatsForDevice(deviceHash);
+        }
+
+        function updateDeviceMeta(deviceHash) {
+            const device = devices.find(d => d.device_hash === deviceHash);
+            deviceLabel.textContent = device ? device.device_hash : 'Select a device';
+            metaUser.textContent = device
+                ? (device.user_email || device.user_id || '—')
+                : '—';
+            metaCreated.textContent = device ? formatTs(device.created_ts) : '—';
+            metaLastSeen.textContent = device ? formatTs(device.last_seen_ts) : '—';
+        }
+
+        async function loadChatsForDevice(deviceHash) {
+            chatTableBody.innerHTML = '<tr><td colspan="3">Loading chats…</td></tr>';
+            messageList.textContent = 'Select a chat to inspect its messages.';
+            chatLabel.textContent = '—';
+            try {
+                const res = await fetch(`/internal/chats/by-device/${deviceHash}`);
+                const data = await res.json();
+                renderChats(data.chats || []);
+            } catch (err) {
+                console.error('chats', err);
+                chatTableBody.innerHTML = '<tr><td colspan="3">Failed to load chats</td></tr>';
+            }
+        }
+
+        function renderChats(chats) {
+            if (!chats.length) {
+                chatTableBody.innerHTML = '<tr><td colspan="3">No chats for this device</td></tr>';
+                return;
+            }
+
+            chatTableBody.innerHTML = '';
+            chats.forEach(chat => {
+                const tr = document.createElement('tr');
+                tr.className = 'chat-row';
+                if (chat.chat_id === selectedChatId) {
+                    tr.classList.add('selected');
+                }
+                tr.innerHTML = `
+                    <td>${chat.chat_id}</td>
+                    <td>${chat.summary ? escapeHtml(chat.summary) : (chat.title ?? '—')}</td>
+                    <td>${formatTs(chat.updated_ts)}</td>
+                `;
+                tr.addEventListener('click', () => selectChat(chat.chat_id));
+                chatTableBody.appendChild(tr);
+            });
+        }
+
+        function selectChat(chatId) {
+            selectedChatId = chatId;
+            highlightRows('.chat-row', chatId);
+            loadMessages(chatId);
+        }
+
+        async function loadMessages(chatId) {
+            chatLabel.textContent = chatId;
+            messageList.textContent = 'Loading messages…';
+            try {
+                const res = await fetch(`/api/chats/${chatId}/messages`);
+                const data = await res.json();
+                const messages = (data.messages || []).slice().sort((a, b) => a.ts - b.ts);
+                renderMessages(messages);
+            } catch (err) {
+                console.error('messages', err);
+                messageList.textContent = 'Failed to load messages';
+            }
+        }
+
+        function renderMessages(messages) {
+            if (!messages.length) {
+                messageList.textContent = 'No messages available';
+                return;
+            }
+
+            messageList.innerHTML = '';
+            messages.forEach(msg => {
+                const container = document.createElement('div');
+                container.className = 'message-item';
+                container.innerHTML = `
+                    <div class="message-meta">
+                        <span>
+                            <span class="pill ${msg.role}">${msg.role}</span>
+                            ${msg.language ? '· ' + msg.language : ''}
+                            · ${formatTs(msg.ts)}
+                        </span>
+                        <span class="actions">
+                            <button data-action="toggle-like">${msg.liked ? 'Unlike' : 'Like'}</button>
+                            <button data-action="delete" class="danger-btn" style="color:#f87171;border-color:#f87171;">Delete</button>
+                        </span>
+                    </div>
+                    <div class="message-text">${escapeHtml(msg.text ?? '')}</div>
+                `;
+                container.querySelector('[data-action="toggle-like"]').addEventListener('click', async () => {
+                    await toggleLike(msg.chat_id, msg.id, !msg.liked);
+                    loadMessages(msg.chat_id);
+                });
+                container.querySelector('[data-action="delete"]').addEventListener('click', async () => {
+                    if (!confirm('Delete this message?')) return;
+                    await deleteMessage(msg.chat_id, msg.id);
+                    loadMessages(msg.chat_id);
+                });
+                messageList.appendChild(container);
+            });
+            messageList.scrollTop = messageList.scrollHeight;
+        }
+
+        async function toggleLike(chatId, messageId, liked) {
+            await fetch(`/internal/chat-thread/${chatId}/message/${messageId}/liked`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ liked })
+            });
+        }
+
+        async function deleteMessage(chatId, messageId) {
+            await fetch(`/internal/chat-thread/${chatId}/message/${messageId}`, { method: 'DELETE' });
+        }
+
+        function highlightRows(selector, idValue) {
+            document.querySelectorAll(selector).forEach(row => {
+                if (row.firstElementChild && row.firstElementChild.textContent === idValue) {
+                    row.classList.add('selected');
+                } else {
+                    row.classList.remove('selected');
+                }
+            });
+        }
+
+        function renderAdminRoutes() {
+            adminRouteList.innerHTML = '';
+            adminRoutes.forEach(route => {
+                const li = document.createElement('li');
+                const link = document.createElement('a');
+                link.href = route.path;
+                link.textContent = route.label;
+                li.appendChild(link);
+                adminRouteList.appendChild(li);
+            });
+        }
+
+        function escapeHtml(text) {
+            return text
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;');
+        }
+
+        function formatTs(ts) {
+            if (!ts) return '—';
+            const date = new Date(ts * 1000);
+            return date.toLocaleString();
+        }
+    </script>
+</body>
+</html>

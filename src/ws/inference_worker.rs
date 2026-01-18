@@ -5,7 +5,9 @@ use tokio::sync::mpsc;
 use tracing::{debug, info};
 use uuid::Uuid;
 
-use crate::conversation::{strip_chatml_markers, trim_partial_chatml};
+use crate::conversation::{
+    build_ministral_prompt, strip_chatml_markers, trim_history, trim_partial_chatml,
+};
 use crate::db::DBLayer;
 use crate::inference::{byte_decoder::tidy_decoded_text, InferenceService};
 use crate::model::message::Message;
@@ -51,15 +53,14 @@ impl InferenceWorker {
 }
 
 fn should_generate_summary(history: &[Message]) -> bool {
-    // 1) If summary already exists, do NOT generate again
     if history.iter().any(|m| m.role == "summary") {
         return false;
     }
 
-    // 2) Generate summary as soon as the first user message exists
     let user_count = history.iter().filter(|m| m.role == "user").count();
+    let assistant_count = history.iter().filter(|m| m.role == "assistant").count();
 
-    user_count == 1
+    user_count > 0 && assistant_count >= 1
 }
 
 async fn worker_loop(mut rx: mpsc::Receiver<InferenceJob>) {
@@ -159,20 +160,17 @@ async fn process_job(job: InferenceJob) {
     // -----------------------
     if should_generate_summary(&history) {
         debug!("summary triggered for chat {}", job.chat_id);
-
-        let history_snapshot = history.clone();
-        tokio::spawn({
-            let db = job.db.clone();
-            let chat_id = job.chat_id.clone();
-            let ws_tx = job.sender.clone();
-            let history_data = history_snapshot;
-
-            async move {
-                if let Err(e) = generate_summary_message(db, chat_id, ws_tx, history_data).await {
-                    eprintln!("summary generation failed: {e}");
-                }
-            }
-        });
+        if let Err(e) = generate_summary_message(
+            job.db.clone(),
+            job.chat_id.clone(),
+            job.sender.clone(),
+            history.clone(),
+            job.infer.clone(),
+        )
+        .await
+        {
+            eprintln!("summary generation failed: {e}");
+        }
     }
 
     let done_msg = serde_json::json!({
@@ -195,32 +193,33 @@ pub async fn generate_summary_message(
     chat_id: String,
     ws_tx: mpsc::Sender<WsMessage>,
     history: Vec<Message>,
+    infer: Arc<InferenceService>,
 ) -> anyhow::Result<()> {
     if history.iter().any(|m| m.role == "summary") {
         return Ok(());
     }
 
-    let user_messages: Vec<&Message> = history.iter().filter(|m| m.role == "user").collect();
-
-    let text_snippets = history
-        .iter()
-        .filter_map(|m| m.text.as_ref())
-        .take(4)
-        .cloned()
-        .collect::<Vec<_>>()
-        .join("\n");
-
-    if text_snippets.trim().is_empty() {
-        return Ok(());
-    }
-
-    let language_hint = user_messages
+    let language_hint = history
         .iter()
         .filter_map(|m| m.language.as_deref())
         .find(|lang| !lang.trim().is_empty());
 
     let normalized_lang = language_hint.and_then(|lang| normalize_language_code(lang));
-    let summary = normalize_summary(&text_snippets);
+    let summary_prompt = build_summary_prompt(&history);
+    if summary_prompt.is_empty() {
+        return Ok(());
+    }
+
+    let cancel = Arc::new(AtomicBool::new(false));
+    let raw = infer
+        .generate_completion(summary_prompt, cancel.clone())
+        .await?;
+    cancel.store(true, Ordering::SeqCst);
+    let trimmed = trim_partial_chatml(&raw);
+    let cleaned = strip_chatml_markers(trimmed).trim().to_string();
+    if cleaned.is_empty() {
+        return Ok(());
+    }
 
     let msg = Message {
         id: Uuid::new_v4().to_string(),
@@ -229,7 +228,7 @@ pub async fn generate_summary_message(
         user_id: None,
         device_hash: None,
         role: "summary".into(),
-        text: Some(summary.clone()),
+        text: Some(cleaned.clone()),
         language: normalized_lang.clone(),
         attachments: Vec::new(),
         liked: false,
@@ -244,7 +243,7 @@ pub async fn generate_summary_message(
         "chat_id": chat_id,
         "message_id": msg.id,
         "role": "summary",
-        "text": summary,
+        "text": cleaned,
         "ts": msg.ts,
         "language": normalized_lang,
     });
@@ -256,22 +255,25 @@ pub async fn generate_summary_message(
     Ok(())
 }
 
-fn normalize_summary(text: &str) -> String {
-    let cleaned = text
-        .replace(['\n', '\r'], " ")
-        .split_whitespace()
-        .take(3)
-        .map(|w| w.trim_matches(|c: char| c.is_ascii_punctuation()))
-        .filter(|w| !w.is_empty())
-        .collect::<Vec<_>>()
-        .join(" ")
-        .to_lowercase();
+const SUMMARY_PROMPT: &str = "Summarize user message to display in ui as chat summary with at most 20 characters.\nAvoid punctuation and keep it lowercase and plain text. If request is in other language than English, summarize in that language.\n";
 
-    if cleaned.is_empty() {
-        "general request".to_string()
-    } else {
-        cleaned
+fn build_summary_prompt(history: &[Message]) -> String {
+    if history.is_empty() {
+        return String::new();
     }
+
+    let mut summary_history: Vec<Message> = history
+        .iter()
+        .filter(|m| m.role == "user")
+        .cloned()
+        .collect();
+
+    if summary_history.is_empty() {
+        return String::new();
+    }
+
+    summary_history = trim_history(summary_history, 6);
+    build_ministral_prompt(&summary_history, Some(SUMMARY_PROMPT))
 }
 
 fn normalize_language_code(raw: &str) -> Option<String> {

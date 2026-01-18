@@ -257,10 +257,10 @@
         let selectedChatId = null;
 
         const adminRoutes = [
-            { label: 'Admin Overview', path: '/internal/admin/overview' },
+            { label: 'Admin UI', path: '/internal/admin' },
+            { label: 'Devices Explorer', path: '/internal/admin/devices' },
             { label: 'Latest Raw Messages', path: '/internal/admin/last?limit=50' },
             { label: 'User Management', path: '/internal/users' },
-            { label: 'Admin UI', path: '/internal/admin' },
         ];
 
         refreshBtn.addEventListener('click', loadOverview);

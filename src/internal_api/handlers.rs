@@ -1,5 +1,9 @@
 use crate::{
-    model::{chat::Chat, message::Message, user::UserRole},
+    model::{
+        chat::Chat,
+        message::Message,
+        user::{User, UserRole},
+    },
     ws::AppState,
 };
 
@@ -12,7 +16,7 @@ use axum::{
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::cmp::Reverse;
+use std::{cmp::Reverse, collections::HashMap};
 use uuid::Uuid;
 
 #[derive(Debug, serde::Serialize)]
@@ -163,21 +167,32 @@ pub async fn list_chats_by_device(
     match state.db.list_chats_for_device(&device_hash).await {
         Ok(mut chats) => {
             chats.sort_by_key(|c| Reverse(c.updated_ts));
-            let chats = chats
-                .into_iter()
-                .map(|c| {
-                    json!({
-                        "chat_id": c.id,
-                        "title": c.title,
-                        "user_id": c.user_id,
-                        "device_hash": c.device_hash,
-                        "updated_ts": c.updated_ts,
-                        "meta": c.meta
-                    })
-                })
-                .collect::<Vec<_>>();
+            let mut rows = Vec::with_capacity(chats.len());
+            for chat in chats {
+                let summary_text = state
+                    .db
+                    .list_messages_for_chat(&chat.id)
+                    .await
+                    .ok()
+                    .and_then(|msgs| {
+                        msgs.into_iter()
+                            .rev()
+                            .find(|m| m.role == "summary")
+                            .and_then(|m| m.text)
+                    });
 
-            Json(json!({ "device_hash": device_hash, "chats": chats }))
+                rows.push(json!({
+                    "chat_id": chat.id,
+                    "title": chat.title,
+                    "summary": summary_text,
+                    "user_id": chat.user_id,
+                    "device_hash": chat.device_hash,
+                    "updated_ts": chat.updated_ts,
+                    "meta": chat.meta
+                }));
+            }
+
+            Json(json!({ "device_hash": device_hash, "chats": rows }))
         }
         Err(e) => Json(json!({
             "device_hash": device_hash,
@@ -485,4 +500,55 @@ pub async fn admin_overview(State(state): State<AppState>) -> Json<AdminOverview
         liked_messages,
         recent_chats: chat_rows,
     })
+}
+
+pub async fn admin_devices_page() -> Html<&'static str> {
+    Html(include_str!("devices.html"))
+}
+
+pub async fn admin_list_devices(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let devices = state.db.list_all_devices().await.unwrap_or_default();
+    let mut users_by_id: HashMap<String, User> = HashMap::new();
+
+    if let Ok(users) = state.db.list_users().await {
+        for user in users {
+            users_by_id.insert(user.id.clone(), user);
+        }
+    }
+
+    let mut rows: Vec<serde_json::Value> = devices
+        .into_iter()
+        .map(|device| {
+            let (user_name, user_email, user_role) = users_by_id
+                .get(&device.user_id)
+                .map(|user| {
+                    (
+                        user.name.clone(),
+                        user.email.clone(),
+                        Some(format!("{:?}", user.role)),
+                    )
+                })
+                .unwrap_or((None, None, None));
+
+            json!({
+                "id": device.id,
+                "user_id": device.user_id,
+                "user_name": user_name,
+                "user_email": user_email,
+                "user_role": user_role,
+                "device_hash": device.device_hash,
+                "created_ts": device.created_ts,
+                "last_seen_ts": device.last_seen_ts,
+                "meta": device.meta,
+            })
+        })
+        .collect();
+
+    rows.sort_by_key(|row| row["last_seen_ts"].as_i64().unwrap_or(0));
+    rows.reverse();
+
+    Json(json!({
+        "count": rows.len(),
+        "devices": rows
+    }))
 }

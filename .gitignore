@@ -9,3 +9,6 @@ storage
 ktulhuauth.json
 payment.env
 llama.cpp
+internal_admin_auth.json
+.venv
+venv

@@ -7,7 +7,13 @@ use crate::{
     model::{chat::Chat, message::Message, user::User, user_device::UserDevice},
 };
 
-use std::{cmp::Ordering, collections::BinaryHeap, str};
+use std::{
+    cmp::Ordering,
+    collections::{BinaryHeap, HashSet},
+    str,
+};
+
+const DEVICE_CHAT_INDEX_FLAG: &str = "device_chat_index:built";
 
 pub struct DBLayer {
     db: DB,
@@ -35,6 +41,73 @@ impl DBLayer {
 
     fn device_lookup_key(device_hash: &str) -> String {
         format!("device_lookup:{device_hash}")
+    }
+
+    fn device_chat_prefix(device_hash: &str) -> String {
+        format!("device_chat:{device_hash}:")
+    }
+
+    fn device_chat_key(device_hash: &str, chat_id: &str) -> String {
+        format!("{}{}", Self::device_chat_prefix(device_hash), chat_id)
+    }
+
+    fn add_chat_to_device_index(&self, device_hash: &str, chat_id: &str) -> Result<()> {
+        if device_hash.is_empty() {
+            return Ok(());
+        }
+        let key = Self::device_chat_key(device_hash, chat_id);
+        self.db.put(key, chat_id.as_bytes())?;
+        self.db.put(DEVICE_CHAT_INDEX_FLAG, b"1")?;
+        Ok(())
+    }
+
+    fn remove_chat_from_device_index(&self, device_hash: &str, chat_id: &str) -> Result<()> {
+        if device_hash.is_empty() {
+            return Ok(());
+        }
+        let key = Self::device_chat_key(device_hash, chat_id);
+        self.db.delete(key)?;
+        Ok(())
+    }
+
+    async fn ensure_device_chat_index(&self) -> Result<()> {
+        if self.db.get(DEVICE_CHAT_INDEX_FLAG)?.is_some() {
+            return Ok(());
+        }
+        self.rebuild_device_chat_index().await
+    }
+
+    async fn rebuild_device_chat_index(&self) -> Result<()> {
+        let prefix = "device_chat:";
+        let mut delete_keys = Vec::new();
+
+        for item in self
+            .db
+            .iterator(IteratorMode::From(prefix.as_bytes(), Direction::Forward))
+        {
+            let (key, _) = item?;
+            let k = str::from_utf8(&key)?;
+            if !k.starts_with(prefix) {
+                break;
+            }
+            delete_keys.push(key);
+        }
+
+        for key in delete_keys {
+            self.db.delete(key)?;
+        }
+
+        // Load chats once so we can insert keys after metadata exists
+        let chats = self.list_chats().await?;
+        for chat in &chats {
+            if let Some(device_hash) = chat.device_hash.as_deref() {
+                let key = Self::device_chat_key(device_hash, &chat.id);
+                self.db.put(key, chat.id.as_bytes())?;
+            }
+        }
+
+        self.db.put(DEVICE_CHAT_INDEX_FLAG, b"1")?;
+        Ok(())
     }
 
     pub async fn save_message(&self, msg: &Message) -> Result<()> {
@@ -207,6 +280,31 @@ impl DBLayer {
     // ============================================================
     pub async fn save_chat(&self, chat: &Chat) -> Result<()> {
         let key = format!("chat:meta:{}", chat.id);
+        let previous_chat: Option<Chat> = self
+            .db
+            .get(&key)?
+            .map(|val| serde_json::from_slice::<Chat>(&val))
+            .transpose()?;
+
+        match (
+            previous_chat
+                .as_ref()
+                .and_then(|c| c.device_hash.as_deref()),
+            chat.device_hash.as_deref(),
+        ) {
+            (Some(old_hash), Some(new_hash)) if old_hash != new_hash => {
+                self.remove_chat_from_device_index(old_hash, &chat.id)?;
+                self.add_chat_to_device_index(new_hash, &chat.id)?;
+            }
+            (Some(old_hash), None) => {
+                self.remove_chat_from_device_index(old_hash, &chat.id)?;
+            }
+            (None, Some(new_hash)) => {
+                self.add_chat_to_device_index(new_hash, &chat.id)?;
+            }
+            _ => {}
+        }
+
         let val = serde_json::to_vec(chat)?;
         self.db.put(key, val)?;
         Ok(())
@@ -244,31 +342,63 @@ impl DBLayer {
 
     /// List all chats belonging to all devices of a user.
     pub async fn list_chats_for_user(&self, user_id: &str) -> Result<Vec<Chat>> {
-        let mut all_chats = Vec::new();
-
         // 1. Load all devices for user
         let devices = self.list_devices_for_user(user_id).await?;
 
+        let mut all_chats = Vec::new();
+        let mut seen_ids = HashSet::new();
+
         // 2. For each device, load its chats
         for device in devices {
-            let mut chats = self.list_chats_for_device(&device.device_hash).await?;
-            all_chats.append(&mut chats);
+            let chats = self.list_chats_for_device(&device.device_hash).await?;
+            for chat in chats {
+                if seen_ids.insert(chat.id.clone()) {
+                    all_chats.push(chat);
+                }
+            }
         }
 
         Ok(all_chats)
     }
 
     pub async fn list_chats_for_device(&self, device_hash: &str) -> Result<Vec<Chat>> {
-        Ok(self
-            .list_chats()
-            .await?
-            .into_iter()
-            .filter(|c| c.device_hash.as_deref() == Some(device_hash))
-            .collect())
+        if device_hash.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        self.ensure_device_chat_index().await?;
+
+        let prefix = Self::device_chat_prefix(device_hash);
+        let mut chat_ids = Vec::new();
+
+        for item in self
+            .db
+            .iterator(IteratorMode::From(prefix.as_bytes(), Direction::Forward))
+        {
+            let (key, _) = item?;
+            let k = str::from_utf8(&key)?;
+            if !k.starts_with(&prefix) {
+                break;
+            }
+            chat_ids.push(k[prefix.len()..].to_string());
+        }
+
+        let mut chats = Vec::with_capacity(chat_ids.len());
+        for chat_id in chat_ids {
+            match self.load_chat(&chat_id).await? {
+                Some(chat) => chats.push(chat),
+                None => {
+                    self.remove_chat_from_device_index(device_hash, &chat_id)?;
+                }
+            }
+        }
+
+        Ok(chats)
     }
 
     /// Delete all messages (and chat metadata) for a chat id.
     pub async fn delete_thread(&self, chat_id: &str) -> Result<()> {
+        let existing_chat = self.load_chat(chat_id).await?;
         let prefix = format!("chat:{}:msg:", chat_id);
 
         // Collect keys first to avoid mutating while iterating.
@@ -292,6 +422,12 @@ impl DBLayer {
         // Remove chat metadata if present.
         let meta_key = format!("chat:meta:{chat_id}");
         let _ = self.db.delete(meta_key);
+
+        if let Some(chat) = existing_chat {
+            if let Some(device_hash) = chat.device_hash.as_deref() {
+                self.remove_chat_from_device_index(device_hash, chat_id)?;
+            }
+        }
 
         Ok(())
     }

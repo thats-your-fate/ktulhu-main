@@ -160,13 +160,26 @@ impl ModelManager {
             }
         };
 
-        for required in ["tokenizer.json", "config.json", "model.safetensors"] {
-            if !intent_router_dir.join(required).exists() {
-                return Err(anyhow!(
-                    "{required} not found under {}",
-                    intent_router_dir.display()
-                ));
-            }
+        if !intent_router_dir.join("tokenizer.json").exists() {
+            return Err(anyhow!(
+                "tokenizer.json not found under {}",
+                intent_router_dir.display()
+            ));
+        }
+        if !intent_router_dir.join("config.json").exists() {
+            return Err(anyhow!(
+                "config.json not found under {}",
+                intent_router_dir.display()
+            ));
+        }
+        let has_weights = ["model.safetensors", "pytorch_model.bin", "model.bin"]
+            .iter()
+            .any(|name| intent_router_dir.join(name).exists());
+        if !has_weights {
+            return Err(anyhow!(
+                "no model weights found under {} (expected model.safetensors or pytorch_model.bin)",
+                intent_router_dir.display()
+            ));
         }
 
         let use_phatic_head = std::env::var("INTENT_ROUTER_PHATIC")

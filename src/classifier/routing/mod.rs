@@ -1,11 +1,11 @@
 use anyhow::{anyhow, Result};
-use candle_core::Tensor;
 use serde::Serialize;
 use tracing::{debug, info};
 
 use crate::{manager::ModelManager, prompts};
 
 const SUPPORT_INTENT_THRESHOLD: f32 = 0.3;
+const PHATIC_LABELS: &[&str] = &["SMALL_TALK", "CONTENTFUL"];
 const SPEECH_ACT_LABELS: &[&str] = &["SOCIAL", "ASKING", "DIRECTING", "EXPRESSING", "SHARING"];
 const DOMAIN_LABELS: &[&str] = &[
     "technical",
@@ -108,7 +108,7 @@ impl Default for IntentRoutingResult {
     }
 }
 
-pub async fn route_intent(
+pub fn route_intent(
     models: &ModelManager,
     text: &str,
     language_hint: Option<&str>,
@@ -123,7 +123,7 @@ pub async fn route_intent(
         result
             .notes
             .push("empty input → default chat behavior".into());
-        info!(?result, "routing pipeline result");
+        log_prompt_selection(&result);
         return Ok(result);
     }
 
@@ -146,9 +146,13 @@ pub async fn route_intent(
     domain.label = domain.label.to_ascii_lowercase();
     let mut expectation = decode_head(&logits.expectation, EXPECTATION_LABELS)?;
     expectation.label = expectation.label.to_ascii_uppercase();
+    let phatic_prediction = logits
+        .phatic
+        .as_ref()
+        .and_then(|values| decode_head(values, PHATIC_LABELS).ok());
 
     let (support_pred, support_on) = decode_support(
-        logits.support.as_ref(),
+        logits.support.as_deref(),
         SUPPORT_LABELS,
         SUPPORT_INTENT_THRESHOLD,
     )?;
@@ -162,14 +166,6 @@ pub async fn route_intent(
         } else {
             result.notes.push("support_intent=ON".into());
         }
-    }
-
-    if is_statement_like(&classify_input) && expectation.label == "ADVICE" && !result.support_intent
-    {
-        expectation.label = "NONE".to_string();
-        result
-            .notes
-            .push("statement-like utterance → expectation downgraded to NONE".into());
     }
 
     if speech_act.label == "DIRECTING"
@@ -198,6 +194,14 @@ pub async fn route_intent(
         expectation.score
     ));
 
+    log_head_predictions(
+        &speech_act,
+        &domain,
+        &expectation,
+        phatic_prediction.as_ref(),
+        support_pred.as_ref(),
+    );
+
     if result.support_intent {
         result
             .notes
@@ -209,67 +213,24 @@ pub async fn route_intent(
         result.routing_path = RoutingPath::ChatLayer;
         result.reasoning_profile = None;
         result.prompt_key = "support_reflective".to_string();
-        info!(?result, "routing pipeline result");
+        log_prompt_selection(&result);
         return Ok(result);
     }
 
-    let sharing_needs_task = speech_act.label == "SHARING"
-        && matches!(expectation.label.as_str(), "INFO" | "ADVICE")
-        && (contains_question_mark(&classify_input)
-            || contains_help_verb(&classify_input)
-            || contains_distress_marker(&classify_input));
-    if sharing_needs_task {
-        result
-            .notes
-            .push("SHARING + info/advice w/ help cue → task escalation".into());
-        let prompt_stub = intent_from_domain(&domain.label);
-        let intent_kind = if prompt_stub == "reasoning" {
-            IntentKind::Reasoning
-        } else {
-            IntentKind::Task
-        };
-        let reasoning_profile = Some(select_reasoning_profile(
-            text,
-            Some(result.language.as_str()),
-            prompt_stub,
-            intent_kind,
-        ));
-        let mut prompt_key = prompts::resolved_prompt_key(prompt_stub, reasoning_profile);
-        let expectation_forces_reasoning =
-            matches!(expectation.label.as_str(), "INFO" | "ADVICE" | "ACTION");
-        if domain.label == "technical"
-            && prompt_key != "reasoning"
-            && prompt_key != "advice_practical"
-            && expectation_forces_reasoning
-        {
-            if result.support_intent {
-                result
-                    .notes
-                    .push("support intent active → empathetic-first response".into());
-            } else {
-                result
-                    .notes
-                    .push("domain=technical → forcing reasoning prompt".into());
-                prompt_key = "reasoning".to_string();
-            }
-        }
-        if result.support_intent {
-            prompt_key = "support_reflective".to_string();
-        }
+    let preference_hint = speech_act.label == "EXPRESSING"
+        && domain.label == "personal"
+        && mentions_preference_topics(trimmed);
 
-        result.speech_act = speech_act;
-        result.domain = domain;
-        result.expectation = expectation;
-        result.final_intent_kind = intent_kind;
-        result.routing_path = RoutingPath::TaskLayer;
-        result.reasoning_profile = reasoning_profile;
-        result.prompt_key = prompt_key;
-        info!(?result, "routing pipeline result");
-        return Ok(result);
-    }
+    let support_label = result.support.as_ref().map(|p| p.label.as_str());
+    let support_is_no_support = matches!(support_label, Some("NO_SUPPORT"));
 
-    let (final_kind, routing_path, prompt_stub, mut routing_notes) =
-        resolve_routing(&speech_act.label, &expectation.label, &domain.label);
+    let (final_kind, routing_path, prompt_stub, mut routing_notes) = resolve_routing(
+        &speech_act.label,
+        &expectation.label,
+        &domain.label,
+        preference_hint,
+        support_is_no_support,
+    );
     result.notes.append(&mut routing_notes);
 
     let reasoning_profile = if routing_path == RoutingPath::TaskLayer {
@@ -315,17 +276,16 @@ pub async fn route_intent(
     result.reasoning_profile = reasoning_profile;
     result.prompt_key = prompt_key;
 
-    info!(?result, "routing pipeline result");
+    log_prompt_selection(&result);
     Ok(result)
 }
 
-fn decode_head(logits: &Tensor, labels: &[&str]) -> Result<HeadPrediction> {
-    let values = logits.to_vec1::<f32>()?;
-    if values.is_empty() {
+fn decode_head(logits: &[f32], labels: &[&str]) -> Result<HeadPrediction> {
+    if logits.is_empty() {
         return Err(anyhow!("empty logits tensor"));
     }
-    let probs = softmax(&values);
-    let (idx, _) = values
+    let probs = softmax(logits);
+    let (idx, _) = logits
         .iter()
         .enumerate()
         .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
@@ -336,18 +296,17 @@ fn decode_head(logits: &Tensor, labels: &[&str]) -> Result<HeadPrediction> {
 }
 
 fn decode_support(
-    logits: Option<&Tensor>,
+    logits: Option<&[f32]>,
     labels: &[&str],
     threshold: f32,
 ) -> Result<(Option<HeadPrediction>, bool)> {
     let Some(logits) = logits else {
         return Ok((None, false));
     };
-    let values = logits.to_vec1::<f32>()?;
-    if values.len() != 2 {
+    if logits.len() != 2 {
         return Ok((None, false));
     }
-    let probs = softmax2([values[0], values[1]]);
+    let probs = softmax2([logits[0], logits[1]]);
 
     let (idx, prob) = if probs[0] >= probs[1] {
         (0, probs[0])
@@ -405,14 +364,69 @@ fn softmax2(logits: [f32; 2]) -> [f32; 2] {
     }
 }
 
+fn log_head_predictions(
+    speech: &HeadPrediction,
+    domain: &HeadPrediction,
+    expectation: &HeadPrediction,
+    phatic: Option<&HeadPrediction>,
+    support: Option<&HeadPrediction>,
+) {
+    let mut lines = vec![
+        format!(
+            "  speech_act: {} ({:.3})",
+            speech.label.as_str(),
+            speech.score
+        ),
+        format!("  domain: {} ({:.3})", domain.label.as_str(), domain.score),
+        format!(
+            "  expectation: {} ({:.3})",
+            expectation.label.as_str(),
+            expectation.score
+        ),
+    ];
+
+    if let Some(pred) = phatic {
+        lines.push(format!(
+            "  phatic: {} ({:.3})",
+            pred.label.as_str(),
+            pred.score
+        ));
+    }
+
+    if let Some(pred) = support {
+        lines.push(format!(
+            "  support: {} ({:.3})",
+            pred.label.as_str(),
+            pred.score
+        ));
+    }
+
+    if !lines.is_empty() {
+        info!("intent classifier predictions:\n{}", lines.join("\n"));
+    }
+}
+
+fn log_prompt_selection(result: &IntentRoutingResult) {
+    info!(
+        "intent router prompt → {} (intent={:?}, path={:?})",
+        result.prompt_key, result.final_intent_kind, result.routing_path
+    );
+}
+
 fn resolve_routing(
     speech_act: &str,
     expectation: &str,
     domain: &str,
+    preference_hint: bool,
+    support_is_no_support: bool,
 ) -> (IntentKind, RoutingPath, &'static str, Vec<String>) {
     let mut notes = Vec::new();
-    if expectation == "NONE" && domain == "personal" && speech_act == "DIRECTING" {
-        notes.push("personal narrative detected → chat_narrative prompt".into());
+    if speech_act == "EXPRESSING"
+        && domain == "personal"
+        && expectation == "ADVICE"
+        && support_is_no_support
+    {
+        notes.push("personal expressive advice without support need → chat_narrative".into());
         return (
             IntentKind::ChatCasual,
             RoutingPath::ChatLayer,
@@ -421,9 +435,46 @@ fn resolve_routing(
         );
     }
 
+    if speech_act == "EXPRESSING" && domain == "personal" && preference_hint {
+        notes.push("personal preference topic detected → opinion_casual prompt".into());
+        return (
+            IntentKind::ChatCasual,
+            RoutingPath::ChatLayer,
+            "opinion_casual",
+            notes,
+        );
+    }
+
+    if expectation == "NONE" && domain == "personal" {
+        if speech_act == "DIRECTING" {
+            notes.push("personal narrative detected → chat_narrative prompt".into());
+            return (
+                IntentKind::ChatCasual,
+                RoutingPath::ChatLayer,
+                "chat_narrative",
+                notes,
+            );
+        }
+
+        if speech_act == "EXPRESSING" {
+            notes.push("personal reflection detected → chat_narrative prompt".into());
+            return (
+                IntentKind::ChatCasual,
+                RoutingPath::ChatLayer,
+                "chat_narrative",
+                notes,
+            );
+        }
+    }
+
     if speech_act == "EXPRESSING" {
         notes.push("EXPRESSING speech act → chat layer".into());
-        let prompt = intent_from_domain(domain);
+        let prompt = if expectation == "NONE" && domain == "technical" {
+            notes.push("EXPRESSING + expectation NONE → reflective technical chat".into());
+            "chat_technical_reflective"
+        } else {
+            intent_from_domain(domain)
+        };
         return (
             IntentKind::ChatCasual,
             RoutingPath::ChatLayer,
@@ -498,6 +549,55 @@ fn intent_from_domain(domain: &str) -> &'static str {
     }
 }
 
+fn mentions_preference_topics(text: &str) -> bool {
+    const PREFERENCE_TOKENS: &[&str] = &[
+        "book",
+        "books",
+        "novel",
+        "novels",
+        "movie",
+        "movies",
+        "film",
+        "films",
+        "music",
+        "song",
+        "songs",
+        "album",
+        "albums",
+        "artist",
+        "artists",
+        "band",
+        "bands",
+        "tv",
+        "show",
+        "shows",
+        "series",
+        "podcast",
+        "podcasts",
+        "game",
+        "games",
+        "food",
+        "foods",
+        "cuisine",
+        "taste",
+        "tastes",
+        "flavor",
+        "flavour",
+        "favorite",
+        "favorites",
+        "favourite",
+        "favourites",
+        "preference",
+        "preferences",
+        "genre",
+        "genres",
+    ];
+    text.to_ascii_lowercase()
+        .split(|c: char| !c.is_ascii_alphabetic())
+        .filter(|token| !token.is_empty())
+        .any(|token| PREFERENCE_TOKENS.contains(&token))
+}
+
 fn normalize_language(language: Option<&str>) -> String {
     language
         .and_then(|lang| lang.split(|c| c == '-' || c == '_').next())
@@ -555,53 +655,6 @@ fn has_multi_intent(utterances: &[String]) -> bool {
         > 1
 }
 
-fn is_statement_like(text: &str) -> bool {
-    let has_question = contains_question_mark(text);
-    if has_question {
-        return false;
-    }
-    !contains_modal_verb(text)
-}
-
-fn contains_modal_verb(text: &str) -> bool {
-    let lower = text.to_ascii_lowercase();
-    const MODALS: &[&str] = &["can", "could", "should", "help"];
-    lower
-        .split(|c: char| !c.is_ascii_alphabetic())
-        .filter(|token| !token.is_empty())
-        .any(|token| MODALS.contains(&token))
-}
-
-fn contains_question_mark(text: &str) -> bool {
-    text.chars().any(|ch| matches!(ch, '?' | '¿' | '？'))
-}
-
-fn contains_help_verb(text: &str) -> bool {
-    const HELPERS: &[&str] = &["help", "assist", "support", "aid"];
-    text.to_ascii_lowercase()
-        .split(|c: char| !c.is_ascii_alphabetic())
-        .filter(|token| !token.is_empty())
-        .any(|token| HELPERS.contains(&token))
-}
-
-fn contains_distress_marker(text: &str) -> bool {
-    const MARKERS: &[&str] = &[
-        "stuck",
-        "lost",
-        "confused",
-        "worried",
-        "afraid",
-        "scared",
-        "frustrated",
-        "overwhelmed",
-        "desperate",
-    ];
-    text.to_ascii_lowercase()
-        .split(|c: char| !c.is_ascii_alphabetic())
-        .filter(|token| !token.is_empty())
-        .any(|token| MARKERS.contains(&token))
-}
-
 fn select_reasoning_profile(
     _text: &str,
     _language: Option<&str>,
@@ -617,5 +670,40 @@ fn profile_from_intent(intent: &str) -> ReasoningProfile {
         "regulated_tax_legal" => ReasoningProfile::RegulatedTaxLegal,
         "opinion_reflective" => ReasoningProfile::ReflectiveAnalysis,
         _ => ReasoningProfile::General,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn expressing_none_technical_stays_in_chat_layer() {
+        let (intent_kind, routing_path, prompt, _) =
+            resolve_routing("EXPRESSING", "NONE", "technical", false, false);
+        assert_eq!(intent_kind, IntentKind::ChatCasual);
+        assert_eq!(routing_path, RoutingPath::ChatLayer);
+        assert_eq!(prompt, "chat_technical_reflective");
+    }
+
+    #[test]
+    fn expressing_personal_none_routes_to_chat_narrative() {
+        let (_, _, prompt, _) =
+            resolve_routing("EXPRESSING", "NONE", "personal", false, false);
+        assert_eq!(prompt, "chat_narrative");
+    }
+
+    #[test]
+    fn expressing_personal_preferences_route_to_opinion_casual() {
+        let (_, _, prompt, _) =
+            resolve_routing("EXPRESSING", "NONE", "personal", true, false);
+        assert_eq!(prompt, "opinion_casual");
+    }
+
+    #[test]
+    fn expressing_personal_advice_without_support_goes_to_chat_narrative() {
+        let (_, _, prompt, _) =
+            resolve_routing("EXPRESSING", "ADVICE", "personal", false, true);
+        assert_eq!(prompt, "chat_narrative");
     }
 }

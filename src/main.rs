@@ -1,4 +1,4 @@
-use std::{fs, sync::Arc};
+use std::{fs, sync::Arc, time::Duration};
 
 use axum::{
     http::{header::AUTHORIZATION, header::CONTENT_TYPE, HeaderName, HeaderValue, Method},
@@ -68,23 +68,28 @@ async fn main() -> anyhow::Result<()> {
     let models = Arc::new(ModelManager::new().await?);
 
     println!("5️⃣ Sanity check (classifier quick pass)");
-    match models
-        .intent_router
-        .classify("machine learning is cool")
-        .and_then(|out| {
+    let router = models.intent_router.clone();
+    let sanity_handle = tokio::task::spawn_blocking(move || {
+        router.classify("machine learning is cool").and_then(|out| {
             let (speech_idx, _) = logits_argmax(&out.speech_act)?;
             let (expect_idx, _) = logits_argmax(&out.expectation)?;
             Ok((speech_idx, expect_idx))
-        }) {
-        Ok((speech, expect)) => {
+        })
+    });
+    match tokio::time::timeout(Duration::from_secs(10), sanity_handle).await {
+        Ok(Ok(Ok((speech, expect)))) => {
             println!(
                 "🧪 classifier check → speech_act={} expectation={}",
                 speech, expect
             );
         }
-        Err(err) => {
+        Ok(Ok(Err(err))) => {
             println!("⚠️  classifier sanity check failed: {err}");
         }
+        Ok(Err(join_err)) => {
+            println!("⚠️  classifier sanity check panicked: {join_err}");
+        }
+        Err(_) => println!("⚠️  classifier sanity check timed out (>10s)"),
     }
 
     // -----------------------------------

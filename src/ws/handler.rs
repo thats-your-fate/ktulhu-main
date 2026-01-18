@@ -20,9 +20,11 @@ use crate::model::message::{Message, MessageAttachment};
 use crate::payment::PaymentService;
 use crate::prompts;
 use crate::ws::inference_worker::{InferenceJob, InferenceWorker};
-use anyhow::anyhow;
+use anyhow::{anyhow, Error};
 use tracing::{debug, info, warn};
 use uuid::Uuid;
+
+const CLASSIFIER_TIMEOUT: Duration = Duration::from_secs(15);
 // ------------------------------------------------------------
 // TYPES
 // ------------------------------------------------------------
@@ -193,26 +195,12 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                             })
                             .collect();
 
-                        let scope = crate::classifier::scope::classify_scope(
-                            &state.models,
-                            classification_text.as_str(),
+                        let (scope, routing_result) = classify_with_timeout(
+                            state.models.clone(),
+                            classification_text.clone(),
+                            parsed.language.clone(),
                         )
-                        .await
-                        .unwrap_or_else(|_| "unknown".into());
-
-                        let routing_result = match crate::classifier::routing::route_intent(
-                            &state.models,
-                            classification_text.as_str(),
-                            parsed.language.as_deref(),
-                        )
-                        .await
-                        {
-                            Ok(v) => v,
-                            Err(err) => {
-                                eprintln!("intent routing failed: {err}");
-                                crate::classifier::routing::IntentRoutingResult::default()
-                            }
-                        };
+                        .await;
                         let prompt_plan = prompts::build_prompt_plan(&routing_result);
                         let rendered_system_prompt =
                             prompts::render_prompt(&prompt_plan, parsed.language.as_deref());
@@ -455,6 +443,39 @@ async fn handle_register(
     .await?;
 
     Ok(())
+}
+
+async fn classify_with_timeout(
+    models: Arc<ModelManager>,
+    text: String,
+    language: Option<String>,
+) -> (String, crate::classifier::routing::IntentRoutingResult) {
+    use crate::classifier::routing::IntentRoutingResult;
+    let handle = tokio::task::spawn_blocking(move || {
+        let scope = crate::classifier::scope::classify_scope(&models, text.as_str())?;
+        let routing =
+            crate::classifier::routing::route_intent(&models, text.as_str(), language.as_deref())?;
+        Ok::<(String, IntentRoutingResult), Error>((scope, routing))
+    });
+
+    match tokio::time::timeout(CLASSIFIER_TIMEOUT, handle).await {
+        Ok(Ok(Ok(pair))) => pair,
+        Ok(Ok(Err(err))) => {
+            eprintln!("intent routing failed: {err}");
+            ("unknown".into(), IntentRoutingResult::default())
+        }
+        Ok(Err(join_err)) => {
+            eprintln!("classifier task panicked: {join_err}");
+            ("unknown".into(), IntentRoutingResult::default())
+        }
+        Err(_) => {
+            eprintln!(
+                "intent routing timed out after {:?}, using default profile",
+                CLASSIFIER_TIMEOUT
+            );
+            ("unknown".into(), IntentRoutingResult::default())
+        }
+    }
 }
 
 // ------------------------------------------------------------

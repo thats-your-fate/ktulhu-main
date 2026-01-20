@@ -6,7 +6,7 @@ use tracing::{debug, info};
 use uuid::Uuid;
 
 use crate::conversation::{
-    build_ministral_prompt, strip_chatml_markers, trim_history, trim_partial_chatml,
+    build_mistral_prompt, strip_chatml_markers, trim_history, trim_partial_chatml,
 };
 use crate::db::DBLayer;
 use crate::inference::{byte_decoder::tidy_decoded_text, InferenceService};
@@ -135,6 +135,7 @@ async fn process_job(job: InferenceJob) {
         attachments: Vec::new(),
         liked: false,
         ts: chrono::Utc::now().timestamp(),
+        meta: None,
     };
 
     if let Err(err) = job.db.save_message(&assistant_msg).await {
@@ -233,6 +234,7 @@ pub async fn generate_summary_message(
         attachments: Vec::new(),
         liked: false,
         ts: chrono::Utc::now().timestamp(),
+        meta: None,
     };
 
     db.save_message(&msg).await?;
@@ -273,7 +275,7 @@ fn build_summary_prompt(history: &[Message]) -> String {
     }
 
     summary_history = trim_history(summary_history, 6);
-    build_ministral_prompt(&summary_history, Some(SUMMARY_PROMPT))
+    build_mistral_prompt(&summary_history, Some(SUMMARY_PROMPT))
 }
 
 fn normalize_language_code(raw: &str) -> Option<String> {

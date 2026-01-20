@@ -129,6 +129,7 @@ pub async fn generate(
         attachments: Vec::new(),
         liked: false,
         ts: Utc::now().timestamp(),
+        meta: None,
     });
 
     let chatml_prompt = build_mistral_prompt(&history, system_prompt.as_deref());

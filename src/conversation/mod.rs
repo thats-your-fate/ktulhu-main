@@ -12,7 +12,6 @@ pub const STOP_SEQS: &[&str] = &["</s>", "<|im_end|>"];
 const BOS_TOKEN: &str = "<s>";
 const EOS_TOKEN: &str = "</s>";
 const CHAT_TEMPLATE_NAME: &str = "hf_chat_template";
-const ENABLE_TEMPLATE: bool = true;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Role {
@@ -33,9 +32,7 @@ impl Role {
     }
 }
 
-const DEFAULT_SYSTEM_PROMPT: &str = "# FRIENDLY COMPANION\n\nYou are a supportive, upbeat assistant.\nBe warm, conversational, and genuinely curious about the user.\nOffer help, ask clarifying questions when useful, and keep answers concise but friendly.\nAvoid negativity or meta-commentary unless the user asks.";
-
-static TEMPLATE_STATE: OnceLock<Option<TemplateState>> = OnceLock::new();
+static TEMPLATE_STATE: OnceLock<TemplateState> = OnceLock::new();
 
 struct TemplateState {
     env: Environment<'static>,
@@ -50,7 +47,7 @@ impl TemplateState {
 #[derive(Serialize)]
 struct TemplateMessage {
     role: String,
-    content: String,
+    context: MessageTemplateContext,
 }
 
 #[derive(Serialize)]
@@ -61,21 +58,22 @@ struct TemplateContext<'a> {
     tools: &'a [serde_json::Value],
 }
 
-pub fn build_mistral_prompt(history: &[Message], system_prompt: Option<&str>) -> String {
-    if ENABLE_TEMPLATE {
-        if let Some(state) = TEMPLATE_STATE.get_or_init(load_template_state).as_ref() {
-            match render_with_template(state, history, system_prompt) {
-                Ok(rendered) => return rendered,
-                Err(err) => warn!(target: "conversation", "chat template rendering failed: {err}"),
-            }
-        }
-    }
-
-    build_legacy_prompt(history, system_prompt)
+#[derive(Serialize, Default)]
+struct MessageTemplateContext {
+    body: Option<String>,
+    attachments: Vec<String>,
 }
 
-pub fn build_ministral_prompt(history: &[Message], system_prompt: Option<&str>) -> String {
-    build_mistral_prompt(history, system_prompt)
+impl MessageTemplateContext {
+    fn is_empty(&self) -> bool {
+        self.body.is_none() && self.attachments.is_empty()
+    }
+}
+
+pub fn build_mistral_prompt(history: &[Message], system_prompt: Option<&str>) -> String {
+    let state = TEMPLATE_STATE.get_or_init(load_template_state);
+    render_with_template(state, history, system_prompt)
+        .unwrap_or_else(|err| panic!("chat template rendering failed: {err}"))
 }
 
 pub fn trim_history(mut history: Vec<Message>, max_messages: usize) -> Vec<Message> {
@@ -147,42 +145,26 @@ pub fn trim_partial_chatml(text: &str) -> &str {
     &text[..end]
 }
 
-fn load_template_state() -> Option<TemplateState> {
-    if !ENABLE_TEMPLATE {
-        return None;
-    }
+fn load_template_state() -> TemplateState {
+    let path = locate_chat_template().unwrap_or_else(|| {
+        panic!(
+            "chat_template.jinja not found; set CHAT_TEMPLATE_PATH or place one in the repo root"
+        )
+    });
 
-    let path = locate_chat_template().or_else(|| {
-        warn!(
-            target: "conversation",
-            "chat_template.jinja not found, falling back to legacy prompt"
-        );
-        None
-    })?;
+    let raw = fs::read_to_string(&path)
+        .unwrap_or_else(|err| panic!("failed to read chat template ({}): {err}", path.display()));
 
-    match fs::read_to_string(&path) {
-        Ok(raw) => {
-            let template_src = Box::leak(raw.into_boxed_str());
-            let mut env = Environment::new();
-            if let Err(err) = env.add_template(CHAT_TEMPLATE_NAME, template_src) {
-                warn!(
-                    target = "conversation",
-                    path = path.display().to_string(),
-                    "failed to compile chat template: {err}"
-                );
-                return None;
-            }
-            Some(TemplateState { env })
-        }
-        Err(err) => {
-            warn!(
-                target = "conversation",
-                path = path.display().to_string(),
-                "failed to read chat template: {err}"
-            );
-            None
-        }
-    }
+    let template_src = Box::leak(raw.into_boxed_str());
+    let mut env = Environment::new();
+    env.add_template(CHAT_TEMPLATE_NAME, template_src)
+        .unwrap_or_else(|err| {
+            panic!(
+                "failed to compile chat template ({}): {err}",
+                path.display()
+            )
+        });
+    TemplateState { env }
 }
 
 fn locate_chat_template() -> Option<PathBuf> {
@@ -198,9 +180,9 @@ fn locate_chat_template() -> Option<PathBuf> {
         );
     }
 
-    let default = Path::new("models/Ministral3-14B-Resoning-gguf/chat_template.jinja");
-    if default.exists() {
-        return Some(default.to_path_buf());
+    let repo_root = Path::new("chat_template.jinja");
+    if repo_root.exists() {
+        return Some(repo_root.to_path_buf());
     }
 
     let mut stack: VecDeque<PathBuf> = VecDeque::new();
@@ -250,9 +232,13 @@ fn template_messages(history: &[Message], system_prompt: Option<&str>) -> Vec<Te
     let mut messages = Vec::new();
 
     if let Some(sys) = system_prompt.filter(|s| !s.trim().is_empty()) {
+        let context = MessageTemplateContext {
+            body: Some(sanitize_template_text(sys.trim())),
+            attachments: Vec::new(),
+        };
         messages.push(TemplateMessage {
             role: "system".into(),
-            content: sanitize_template_text(sys.trim()),
+            context,
         });
     }
 
@@ -265,93 +251,59 @@ fn template_messages(history: &[Message], system_prompt: Option<&str>) -> Vec<Te
         };
 
         if role == "system" {
-            if let Some(content) = assemble_message_text(msg) {
+            let context = assemble_message_context(msg);
+            if !context.is_empty() {
                 messages.push(TemplateMessage {
                     role: role.into(),
-                    content,
+                    context,
                 });
             }
             continue;
         }
 
-        if let Some(content) = assemble_message_text(msg) {
-            push_with_alternation(&mut messages, role, content);
+        let context = assemble_message_context(msg);
+        if context.is_empty() {
+            continue;
         }
+        push_with_alternation(&mut messages, role, context);
     }
 
     messages
 }
 
-fn push_with_alternation(messages: &mut Vec<TemplateMessage>, role: &str, content: String) {
+fn push_with_alternation(
+    messages: &mut Vec<TemplateMessage>,
+    role: &str,
+    context: MessageTemplateContext,
+) {
     if let Some(last) = messages.last() {
         if last.role == role {
             let filler_role = if role == "user" { "assistant" } else { "user" };
             messages.push(TemplateMessage {
                 role: filler_role.into(),
-                content: String::new(),
+                context: MessageTemplateContext::default(),
             });
         }
     }
 
     messages.push(TemplateMessage {
         role: role.into(),
-        content,
+        context,
     });
 }
 
-fn assemble_message_text(msg: &Message) -> Option<String> {
-    let text = msg.text.as_deref().unwrap_or("").trim();
-    let mut body = sanitize_template_text(text);
+fn assemble_message_context(msg: &Message) -> MessageTemplateContext {
+    let body = msg
+        .text
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(sanitize_template_text);
 
-    let attachment_notes = message_attachment_summaries(&msg.attachments);
-    if !attachment_notes.is_empty() {
-        if !body.is_empty() {
-            body.push_str("\n\n");
-        }
-        body.push_str("[Attachments]\n");
-        for note in attachment_notes {
-            body.push_str("- ");
-            body.push_str(&sanitize_template_text(&note));
-            body.push('\n');
-        }
-    }
+    let attachments = message_attachment_summaries(&msg.attachments)
+        .into_iter()
+        .map(|a| sanitize_template_text(&a))
+        .collect();
 
-    if body.is_empty() {
-        None
-    } else {
-        Some(body)
-    }
-}
-
-fn build_legacy_prompt(history: &[Message], system_prompt: Option<&str>) -> String {
-    let sys = system_prompt.unwrap_or(DEFAULT_SYSTEM_PROMPT).trim();
-    let mut out = String::new();
-
-    out.push_str("<|im_start|>system\n");
-    out.push_str(sys);
-    out.push_str("\n<|im_end|>\n");
-
-    for msg in history {
-        let Some(text) = assemble_message_text(msg) else {
-            continue;
-        };
-
-        match msg.role.as_str() {
-            "user" => {
-                out.push_str("<|im_start|>user\n");
-                out.push_str(&text);
-                out.push_str("\n<|im_end|>\n");
-            }
-            "assistant" => {
-                out.push_str("<|im_start|>assistant\n");
-                out.push_str(&text);
-                out.push_str("\n<|im_end|>\n");
-            }
-            "system" => {}
-            _ => {}
-        }
-    }
-
-    out.push_str("<|im_start|>assistant\n");
-    out
+    MessageTemplateContext { body, attachments }
 }

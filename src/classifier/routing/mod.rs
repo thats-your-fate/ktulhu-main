@@ -79,6 +79,8 @@ pub struct IntentRoutingResult {
     pub speech_act: HeadPrediction,
     pub domain: HeadPrediction,
     pub expectation: HeadPrediction,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub phatic: Option<HeadPrediction>,
     pub final_intent_kind: IntentKind,
     pub routing_path: RoutingPath,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -97,6 +99,7 @@ impl Default for IntentRoutingResult {
             speech_act: HeadPrediction::new("SOCIAL", 1.0),
             domain: HeadPrediction::new("chat", 1.0),
             expectation: HeadPrediction::new("NONE", 1.0),
+            phatic: None,
             final_intent_kind: IntentKind::ChatCasual,
             routing_path: RoutingPath::ChatLayer,
             reasoning_profile: None,
@@ -201,6 +204,7 @@ pub fn route_intent(
         phatic_prediction.as_ref(),
         support_pred.as_ref(),
     );
+    result.phatic = phatic_prediction.clone();
 
     if result.support_intent {
         result
@@ -688,22 +692,19 @@ mod tests {
 
     #[test]
     fn expressing_personal_none_routes_to_chat_narrative() {
-        let (_, _, prompt, _) =
-            resolve_routing("EXPRESSING", "NONE", "personal", false, false);
+        let (_, _, prompt, _) = resolve_routing("EXPRESSING", "NONE", "personal", false, false);
         assert_eq!(prompt, "chat_narrative");
     }
 
     #[test]
     fn expressing_personal_preferences_route_to_opinion_casual() {
-        let (_, _, prompt, _) =
-            resolve_routing("EXPRESSING", "NONE", "personal", true, false);
+        let (_, _, prompt, _) = resolve_routing("EXPRESSING", "NONE", "personal", true, false);
         assert_eq!(prompt, "opinion_casual");
     }
 
     #[test]
     fn expressing_personal_advice_without_support_goes_to_chat_narrative() {
-        let (_, _, prompt, _) =
-            resolve_routing("EXPRESSING", "ADVICE", "personal", false, true);
+        let (_, _, prompt, _) = resolve_routing("EXPRESSING", "ADVICE", "personal", false, true);
         assert_eq!(prompt, "chat_narrative");
     }
 }

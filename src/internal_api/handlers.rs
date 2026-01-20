@@ -105,6 +105,7 @@ pub async fn update_summary(
         attachments: Vec::new(),
         liked: false,
         ts: Utc::now().timestamp(),
+        meta: None,
     };
 
     match state.db.save_message(&msg).await {

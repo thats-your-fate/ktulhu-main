@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
@@ -16,6 +17,8 @@ pub struct Message {
     #[serde(default)]
     pub liked: bool,
     pub ts: i64,
+    #[serde(default)]
+    pub meta: Option<Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

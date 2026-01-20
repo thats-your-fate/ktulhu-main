@@ -157,11 +157,51 @@
             flex-wrap: wrap;
             gap: 8px;
         }
+        .message-body {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            margin-top: 6px;
+        }
         .message-text {
-            margin: 6px 0;
             white-space: pre-wrap;
             word-break: break-word;
             overflow-wrap: anywhere;
+        }
+        .classifier-meta {
+            background: rgba(99, 102, 241, 0.08);
+            border: 1px solid rgba(99, 102, 241, 0.25);
+            border-radius: 8px;
+            padding: 8px 10px;
+            font-size: 0.75rem;
+            color: #c7d2fe;
+            width: 25%;
+            min-width: 200px;
+            align-self: flex-start;
+        }
+        .classifier-title {
+            font-size: 0.7rem;
+            letter-spacing: 0.05em;
+            color: #a5b4fc;
+            text-transform: uppercase;
+            margin-bottom: 4px;
+        }
+        .classifier-grid {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+        .classifier-row {
+            display: flex;
+            justify-content: space-between;
+            gap: 12px;
+        }
+        .classifier-row span:first-child {
+            color: #9ca3af;
+        }
+        .classifier-row span:last-child {
+            font-weight: 600;
+            text-align: right;
         }
         .pill {
             padding: 2px 8px;
@@ -399,6 +439,7 @@
             messages.forEach(msg => {
                 const container = document.createElement('div');
                 container.className = 'message-item';
+                const classifierHtml = renderClassifierBox(msg.meta);
                 container.innerHTML = `
                     <div class="message-meta">
                         <span>
@@ -411,7 +452,10 @@
                             <button data-action="delete" class="danger-btn" style="color:#f87171;border-color:#f87171;">Delete</button>
                         </span>
                     </div>
-                    <div class="message-text">${escapeHtml(msg.text ?? '')}</div>
+                    <div class="message-body">
+                        <div class="message-text">${escapeHtml(msg.text ?? '')}</div>
+                        ${classifierHtml}
+                    </div>
                 `;
                 container.querySelector('[data-action="toggle-like"]').addEventListener('click', async () => {
                     await toggleLike(msg.chat_id, msg.id, !msg.liked);
@@ -466,6 +510,68 @@
                 .replace(/&/g, '&amp;')
                 .replace(/</g, '&lt;')
                 .replace(/>/g, '&gt;');
+        }
+
+        function formatHeadPrediction(head) {
+            if (!head) return null;
+            const label = escapeHtml(head.label ?? '');
+            if (!label) return null;
+            if (typeof head.score === 'number') {
+                return `${label} (${head.score.toFixed(3)})`;
+            }
+            return label;
+        }
+
+        function renderClassifierBox(meta) {
+            if (!meta || !meta.classifier) return '';
+            const { classifier, intent } = meta;
+            const rows = [];
+
+            rows.push({ label: 'Speech Act', value: formatHeadPrediction(classifier.speech_act) });
+            rows.push({ label: 'Domain', value: formatHeadPrediction(classifier.domain) });
+            rows.push({ label: 'Expectation', value: formatHeadPrediction(classifier.expectation) });
+            rows.push({ label: 'Phatic', value: formatHeadPrediction(classifier.phatic) });
+            rows.push({ label: 'Support', value: formatHeadPrediction(classifier.support) });
+
+            if (intent) {
+                if (intent.prompt_key) {
+                    rows.push({ label: 'Prompt Key', value: escapeHtml(intent.prompt_key) });
+                }
+                if (intent.routing_path) {
+                    rows.push({
+                        label: 'Routing Path',
+                        value: escapeHtml(String(intent.routing_path)),
+                    });
+                }
+                if (intent.final_intent_kind) {
+                    rows.push({
+                        label: 'Intent Kind',
+                        value: escapeHtml(String(intent.final_intent_kind)),
+                    });
+                }
+            }
+
+            const filtered = rows.filter(row => row.value);
+            if (!filtered.length) return '';
+
+            const grid = filtered
+                .map(
+                    row => `
+                <div class="classifier-row">
+                    <span>${row.label}</span>
+                    <span>${row.value}</span>
+                </div>`
+                )
+                .join('');
+
+            return `
+                <div class="classifier-meta">
+                    <div class="classifier-title">Classifier Decision</div>
+                    <div class="classifier-grid">
+                        ${grid}
+                    </div>
+                </div>
+            `;
         }
 
         function formatTs(ts) {

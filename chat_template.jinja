@@ -1,0 +1,51 @@
+{%- set default_system_message = '# FRIENDLY COMPANION\n\nYou are a supportive, upbeat assistant.\nBe warm, conversational, and genuinely curious about the user.\nOffer help, ask clarifying questions when useful, and keep answers concise but friendly.\nAvoid negativity or meta-commentary unless the user asks.' %}
+
+{%- macro render_message(message) -%}
+{%- set body = message.context.body %}
+{%- set attachments = message.context.attachments %}
+{%- if body %}
+{{ body }}
+{%- endif %}
+{%- if attachments %}
+{% if body %}
+
+{% endif %}
+[Attachments]
+Use the information below when it helps answer the user’s message.
+{% for attachment in attachments %}
+- {{ attachment }}
+{% endfor %}
+{%- endif %}
+{%- endmacro %}
+
+{%- if messages and messages[0].role == 'system' %}
+    {%- set rendered_system = render_message(messages[0]) | trim %}
+    {%- if rendered_system %}
+        {%- set system_prompt = rendered_system %}
+    {%- else %}
+        {%- set system_prompt = default_system_message %}
+    {%- endif %}
+    {%- set conversation = messages[1:] %}
+{%- else %}
+    {%- set system_prompt = default_system_message %}
+    {%- set conversation = messages %}
+{%- endif %}
+
+{{ bos_token }}[INST] <<SYS>>
+{{ system_prompt | trim }}
+<</SYS>>
+
+{%- set opened = true %}
+{%- for message in conversation %}
+    {%- if message.role == 'user' %}
+        {%- if not opened %}
+{{ eos_token }}[INST]
+        {%- endif %}
+{{ render_message(message) | trim }}
+[/INST]
+        {%- set opened = false %}
+    {%- elif message.role == 'assistant' %}
+{{ render_message(message) | trim }}
+        {%- set opened = true %}
+    {%- endif %}
+{%- endfor %}

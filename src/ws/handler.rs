@@ -10,7 +10,7 @@ use tokio::sync::{mpsc, Mutex};
 use tokio::time::{timeout, Duration};
 
 use crate::attachments::{attachment_summaries, IncomingAttachment};
-use crate::conversation::{build_ministral_prompt, trim_history};
+use crate::conversation::{build_mistral_prompt, trim_history};
 use crate::db::DBLayer;
 use crate::inference::InferenceService;
 use crate::internal_api::handlers::ensure_chat_for_device;
@@ -195,7 +195,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                             })
                             .collect();
 
-                        let (scope, routing_result) = classify_with_timeout(
+                        let routing_result = classify_with_timeout(
                             state.models.clone(),
                             classification_text.clone(),
                             parsed.language.clone(),
@@ -226,10 +226,11 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                             "intent decision summary"
                         );
 
+                        let classifier_meta = build_classifier_metadata(&routing_result);
+
                         // Send classifier debug meta
                         let classifier_payload = serde_json::json!({
                             "type": "classifier_debug",
-                            "scope": scope,
                             "intent_result": routing_result.clone(),
                         });
                         if let Err(err) = send_json(&tx, classifier_payload).await {
@@ -320,6 +321,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                             attachments: stored_attachments.clone(),
                             liked: false,
                             ts: chrono::Utc::now().timestamp(),
+                            meta: Some(classifier_meta),
                         };
 
                         if matches!(history.last().map(|m| m.role.as_str()), Some("user")) {
@@ -341,9 +343,9 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                         // Trim long histories
                         history = trim_history(history, 24);
 
-                        // Build Mistral prompt
+                        // Build chat prompt
                         let base_prompt =
-                            build_ministral_prompt(&history, Some(&rendered_system_prompt));
+                            build_mistral_prompt(&history, Some(&rendered_system_prompt));
                         info!(
                             chat_id = parsed.chat_id.as_str(),
                             session_id = parsed.session_id.as_str(),
@@ -449,33 +451,53 @@ async fn classify_with_timeout(
     models: Arc<ModelManager>,
     text: String,
     language: Option<String>,
-) -> (String, crate::classifier::routing::IntentRoutingResult) {
+) -> crate::classifier::routing::IntentRoutingResult {
     use crate::classifier::routing::IntentRoutingResult;
     let handle = tokio::task::spawn_blocking(move || {
-        let scope = crate::classifier::scope::classify_scope(&models, text.as_str())?;
         let routing =
             crate::classifier::routing::route_intent(&models, text.as_str(), language.as_deref())?;
-        Ok::<(String, IntentRoutingResult), Error>((scope, routing))
+        Ok::<IntentRoutingResult, Error>(routing)
     });
 
     match tokio::time::timeout(CLASSIFIER_TIMEOUT, handle).await {
-        Ok(Ok(Ok(pair))) => pair,
+        Ok(Ok(Ok(result))) => result,
         Ok(Ok(Err(err))) => {
             eprintln!("intent routing failed: {err}");
-            ("unknown".into(), IntentRoutingResult::default())
+            IntentRoutingResult::default()
         }
         Ok(Err(join_err)) => {
             eprintln!("classifier task panicked: {join_err}");
-            ("unknown".into(), IntentRoutingResult::default())
+            IntentRoutingResult::default()
         }
         Err(_) => {
             eprintln!(
                 "intent routing timed out after {:?}, using default profile",
                 CLASSIFIER_TIMEOUT
             );
-            ("unknown".into(), IntentRoutingResult::default())
+            IntentRoutingResult::default()
         }
     }
+}
+
+fn build_classifier_metadata(
+    result: &crate::classifier::routing::IntentRoutingResult,
+) -> serde_json::Value {
+    serde_json::json!({
+        "classifier": {
+            "speech_act": &result.speech_act,
+            "domain": &result.domain,
+            "expectation": &result.expectation,
+            "phatic": result.phatic.as_ref(),
+            "support": result.support.as_ref(),
+        },
+        "intent": {
+            "language": result.language.as_str(),
+            "prompt_key": result.prompt_key.as_str(),
+            "routing_path": result.routing_path,
+            "final_intent_kind": result.final_intent_kind,
+            "support_intent": result.support_intent,
+        }
+    })
 }
 
 // ------------------------------------------------------------

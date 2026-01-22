@@ -239,10 +239,12 @@ impl LlamaInner {
         self.decode_sequence(&prompt_tokens)?;
         let mut pending = Vec::new();
 
+        // prompt already decoded
         for _ in 0..self.max_tokens {
             if cancel.load(Ordering::SeqCst) {
                 break;
             }
+            // sample from CURRENT logits
             let token = unsafe { ffi::llama_sampler_sample(self.sampler, self.ctx, -1) };
             if token == self.eos_token || token == ffi::LLAMA_TOKEN_NULL {
                 break;
@@ -250,13 +252,13 @@ impl LlamaInner {
             unsafe {
                 ffi::llama_sampler_accept(self.sampler, token);
             }
+            // render token
             let piece = self.render_token_bytes(token)?;
-            if piece.is_empty() {
-                self.flush_pending(&mut pending, &tx)?;
-                continue;
+            if !piece.is_empty() {
+                pending.extend_from_slice(&piece);
             }
-            pending.extend_from_slice(&piece);
             self.flush_pending(&mut pending, &tx)?;
+            // NOW decode token → refresh logits
             self.decode_sequence(std::slice::from_ref(&token))?;
         }
         // Flush any remaining buffered bytes.

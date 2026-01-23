@@ -1,11 +1,12 @@
 use anyhow::{anyhow, bail, Result};
 use rand::{thread_rng, Rng};
+use std::collections::VecDeque;
 use std::ffi::CString;
 use std::os::raw::c_char;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use tokio::sync::mpsc;
 
 #[allow(
@@ -38,24 +39,39 @@ fn shutdown_backend() {
 }
 
 pub struct LlamaCppService {
-    inner: Arc<Mutex<LlamaInner>>,
+    pool: ContextPool,
 }
 
-struct LlamaInner {
+struct SharedModel {
     model: *mut ffi::llama_model,
-    ctx: *mut ffi::llama_context,
-    sampler: *mut ffi::llama_sampler,
     vocab: *const ffi::llama_vocab,
     eos_token: ffi::llama_token,
     n_batch: i32,
     max_tokens: usize,
+}
+
+impl Drop for SharedModel {
+    fn drop(&mut self) {
+        unsafe {
+            if !self.model.is_null() {
+                ffi::llama_model_free(self.model);
+            }
+        }
+        shutdown_backend();
+    }
+}
+
+struct LlamaContext {
+    shared: Arc<SharedModel>,
+    ctx: *mut ffi::llama_context,
+    sampler: *mut ffi::llama_sampler,
     n_past: i32,
 }
 
-unsafe impl Send for LlamaInner {}
-unsafe impl Sync for LlamaInner {}
+unsafe impl Send for LlamaContext {}
+unsafe impl Sync for LlamaContext {}
 
-impl Drop for LlamaInner {
+impl Drop for LlamaContext {
     fn drop(&mut self) {
         unsafe {
             if !self.sampler.is_null() {
@@ -64,11 +80,36 @@ impl Drop for LlamaInner {
             if !self.ctx.is_null() {
                 ffi::llama_free(self.ctx);
             }
-            if !self.model.is_null() {
-                ffi::llama_model_free(self.model);
-            }
         }
-        shutdown_backend();
+    }
+}
+
+struct ContextHandle {
+    ctx: Mutex<LlamaContext>,
+}
+
+#[derive(Clone)]
+struct ContextPool {
+    inner: Arc<ContextPoolInner>,
+}
+
+struct ContextPoolInner {
+    queue: Mutex<VecDeque<Arc<ContextHandle>>>,
+    available: Condvar,
+}
+
+struct ContextLease {
+    pool: Arc<ContextPoolInner>,
+    ctx: Option<Arc<ContextHandle>>,
+}
+
+impl Drop for ContextLease {
+    fn drop(&mut self) {
+        if let Some(ctx) = self.ctx.take() {
+            let mut queue = self.pool.queue.lock().unwrap();
+            queue.push_back(ctx);
+            self.pool.available.notify_one();
+        }
     }
 }
 
@@ -83,6 +124,7 @@ impl LlamaCppService {
         top_k: i32,
         gpu_layers: Option<i32>,
         threads: Option<i32>,
+        pool_size: usize,
     ) -> Result<Self> {
         init_backend();
         println!("⚡️ llama.cpp params: ctx={ctx_length} max_tokens={max_tokens} temp={temperature} top_p={top_p} top_k={top_k} gpu_layers={:?} threads={:?}", gpu_layers, threads);
@@ -91,11 +133,16 @@ impl LlamaCppService {
             bail!("GGUF model not found at {}", path.display());
         }
 
+        if pool_size == 0 {
+            bail!("context pool size must be at least 1");
+        }
+
         let path_cstr = CString::new(path.as_os_str().as_bytes())
             .map_err(|_| anyhow!("model path contains interior null byte"))?;
 
         let mut model_params = unsafe { ffi::llama_model_default_params() };
         model_params.n_gpu_layers = gpu_layers.unwrap_or(-1);
+        model_params.main_gpu = 0;
         model_params.use_mmap = true;
 
         let model = unsafe { ffi::llama_model_load_from_file(path_cstr.as_ptr(), model_params) };
@@ -113,21 +160,81 @@ impl LlamaCppService {
             bail!("model vocabulary unavailable");
         }
 
+        let shared = Arc::new(SharedModel {
+            model,
+            vocab,
+            eos_token: unsafe { ffi::llama_vocab_eos(vocab) },
+            n_batch: 512,
+            max_tokens,
+        });
+
+        let threads = threads.unwrap_or_else(|| num_cpus::get_physical() as i32);
+        let mut contexts = Vec::with_capacity(pool_size);
+        for _ in 0..pool_size {
+            contexts.push(LlamaContext::create(
+                shared.clone(),
+                ctx_length,
+                threads,
+                temperature,
+                top_p,
+                top_k,
+            )?);
+        }
+
+        Ok(Self {
+            pool: ContextPool::new(contexts),
+        })
+    }
+
+    pub fn generate_stream(
+        &self,
+        prompt: String,
+        cancel: Arc<AtomicBool>,
+    ) -> mpsc::Receiver<String> {
+        let (tx, rx) = mpsc::channel(128);
+        let pool = self.pool.clone();
+        tokio::task::spawn_blocking(move || {
+            let lease = pool.checkout();
+            if let Err(err) = lease.run(&prompt, cancel, tx.clone()) {
+                let _ = tx.blocking_send(format!("llama.cpp error: {err}"));
+            }
+        });
+        rx
+    }
+
+    pub async fn generate_completion(
+        &self,
+        prompt: String,
+        cancel: Arc<AtomicBool>,
+    ) -> Result<String> {
+        let mut rx = self.generate_stream(prompt, cancel);
+        let mut out = String::new();
+        while let Some(chunk) = rx.recv().await {
+            out.push_str(&chunk);
+        }
+        Ok(out)
+    }
+}
+
+impl LlamaContext {
+    fn create(
+        shared: Arc<SharedModel>,
+        ctx_length: u32,
+        threads: i32,
+        temperature: f32,
+        top_p: f32,
+        top_k: i32,
+    ) -> Result<Self> {
         let mut ctx_params = unsafe { ffi::llama_context_default_params() };
         ctx_params.n_ctx = ctx_length;
-        ctx_params.n_batch = 512;
-        ctx_params.n_ubatch = 512;
-        let threads = threads.unwrap_or_else(|| num_cpus::get_physical() as i32);
+        ctx_params.n_batch = shared.n_batch as u32;
+        ctx_params.n_ubatch = shared.n_batch as u32;
         ctx_params.n_threads = threads;
         ctx_params.n_threads_batch = threads;
         ctx_params.offload_kqv = true;
 
-        let ctx = unsafe { ffi::llama_init_from_model(model, ctx_params) };
+        let ctx = unsafe { ffi::llama_init_from_model(shared.model, ctx_params) };
         if ctx.is_null() {
-            unsafe {
-                ffi::llama_model_free(model);
-            }
-            shutdown_backend();
             bail!("failed to create llama context");
         }
 
@@ -138,9 +245,7 @@ impl LlamaCppService {
         if sampler.is_null() {
             unsafe {
                 ffi::llama_free(ctx);
-                ffi::llama_model_free(model);
             }
-            shutdown_backend();
             bail!("failed to create sampler chain");
         }
 
@@ -162,64 +267,12 @@ impl LlamaCppService {
             ffi::llama_sampler_chain_add(sampler, dist);
         }
 
-        let eos_token = unsafe { ffi::llama_vocab_eos(vocab) };
-
-        let inner = LlamaInner {
-            model,
+        Ok(Self {
+            shared,
             ctx,
             sampler,
-            vocab,
-            eos_token,
-            n_batch: 512,
-            max_tokens,
             n_past: 0,
-        };
-
-        Ok(Self {
-            inner: Arc::new(Mutex::new(inner)),
         })
-    }
-
-    pub fn generate_stream(
-        &self,
-        prompt: String,
-        cancel: Arc<AtomicBool>,
-    ) -> mpsc::Receiver<String> {
-        let (tx, rx) = mpsc::channel(128);
-        let inner = self.inner.clone();
-        tokio::task::spawn_blocking(move || {
-            if let Err(err) = LlamaInner::run_with_guard(inner, &prompt, cancel, tx.clone()) {
-                let _ = tx.blocking_send(format!("llama.cpp error: {err}"));
-            }
-        });
-        rx
-    }
-
-    pub async fn generate_completion(
-        &self,
-        prompt: String,
-        cancel: Arc<AtomicBool>,
-    ) -> Result<String> {
-        let mut rx = self.generate_stream(prompt, cancel);
-        let mut out = String::new();
-        while let Some(chunk) = rx.recv().await {
-            out.push_str(&chunk);
-        }
-        Ok(out)
-    }
-}
-
-impl LlamaInner {
-    fn run_with_guard(
-        inner: Arc<Mutex<LlamaInner>>,
-        prompt: &str,
-        cancel: Arc<AtomicBool>,
-        tx: mpsc::Sender<String>,
-    ) -> Result<()> {
-        let mut guard = inner
-            .lock()
-            .map_err(|_| anyhow!("failed to lock llama context"))?;
-        guard.run(prompt, cancel, tx)
     }
 
     fn run(
@@ -239,29 +292,25 @@ impl LlamaInner {
         self.decode_sequence(&prompt_tokens)?;
         let mut pending = Vec::new();
 
-        // prompt already decoded
-        for _ in 0..self.max_tokens {
+        for _ in 0..self.shared.max_tokens {
             if cancel.load(Ordering::SeqCst) {
                 break;
             }
-            // sample from CURRENT logits
             let token = unsafe { ffi::llama_sampler_sample(self.sampler, self.ctx, -1) };
-            if token == self.eos_token || token == ffi::LLAMA_TOKEN_NULL {
+            if token == self.shared.eos_token || token == ffi::LLAMA_TOKEN_NULL {
                 break;
             }
             unsafe {
                 ffi::llama_sampler_accept(self.sampler, token);
             }
-            // render token
             let piece = self.render_token_bytes(token)?;
             if !piece.is_empty() {
                 pending.extend_from_slice(&piece);
             }
             self.flush_pending(&mut pending, &tx)?;
-            // NOW decode token → refresh logits
             self.decode_sequence(std::slice::from_ref(&token))?;
         }
-        // Flush any remaining buffered bytes.
+
         self.flush_pending(&mut pending, &tx)?;
         Ok(())
     }
@@ -273,7 +322,7 @@ impl LlamaInner {
         loop {
             let res = unsafe {
                 ffi::llama_tokenize(
-                    self.vocab,
+                    self.shared.vocab,
                     text_ptr,
                     bytes.len() as i32,
                     buf.as_mut_ptr(),
@@ -297,9 +346,9 @@ impl LlamaInner {
         }
         let mut processed = 0usize;
         while processed < tokens.len() {
-            let take = (tokens.len() - processed).min(self.n_batch as usize);
+            let take = (tokens.len() - processed).min(self.shared.n_batch as usize);
             let chunk = &tokens[processed..processed + take];
-            let mut batch = unsafe { ffi::llama_batch_init(self.n_batch, 0, 1) };
+            let mut batch = unsafe { ffi::llama_batch_init(self.shared.n_batch, 0, 1) };
             unsafe {
                 let token_slice = std::slice::from_raw_parts_mut(batch.token, chunk.len());
                 token_slice.copy_from_slice(chunk);
@@ -337,7 +386,7 @@ impl LlamaInner {
         loop {
             let res = unsafe {
                 ffi::llama_token_to_piece(
-                    self.vocab,
+                    self.shared.vocab,
                     token,
                     buf.as_mut_ptr() as *mut c_char,
                     buf.len() as i32,
@@ -381,17 +430,69 @@ impl LlamaInner {
                         continue;
                     }
                     if let Some(error_len) = err.error_len() {
-                        // Drop invalid sequence and emit replacement char.
                         pending.drain(..error_len);
                         if tx.blocking_send("�".to_string()).is_err() {
                             return Ok(());
                         }
                     } else {
-                        // Need more bytes for a valid UTF-8 sequence.
                         return Ok(());
                     }
                 }
             }
         }
+    }
+}
+
+impl ContextHandle {
+    fn lock(&self) -> Result<std::sync::MutexGuard<'_, LlamaContext>> {
+        self.ctx
+            .lock()
+            .map_err(|_| anyhow!("failed to lock llama context"))
+    }
+}
+
+impl ContextPool {
+    fn new(contexts: Vec<LlamaContext>) -> Self {
+        let handles: VecDeque<_> = contexts
+            .into_iter()
+            .map(|ctx| Arc::new(ContextHandle {
+                ctx: Mutex::new(ctx),
+            }))
+            .collect();
+        Self {
+            inner: Arc::new(ContextPoolInner {
+                queue: Mutex::new(handles),
+                available: Condvar::new(),
+            }),
+        }
+    }
+
+    fn checkout(&self) -> ContextLease {
+        let mut queue = self.inner.queue.lock().unwrap();
+        loop {
+            if let Some(ctx) = queue.pop_front() {
+                return ContextLease {
+                    pool: Arc::clone(&self.inner),
+                    ctx: Some(ctx),
+                };
+            }
+            queue = self.inner.available.wait(queue).unwrap();
+        }
+    }
+}
+
+impl ContextLease {
+    fn run(
+        &self,
+        prompt: &str,
+        cancel: Arc<AtomicBool>,
+        tx: mpsc::Sender<String>,
+    ) -> Result<()> {
+        let ctx = self
+            .ctx
+            .as_ref()
+            .expect("context should not be None in active lease");
+        let mut guard = ctx.lock()?;
+        guard.run(prompt, cancel, tx)
     }
 }

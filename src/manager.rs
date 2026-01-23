@@ -75,7 +75,11 @@ impl ModelManager {
         let llama_ctx_size = std::env::var("LLAMA_CLI_CTX")
             .ok()
             .and_then(|v| v.parse::<u32>().ok())
-            .unwrap_or(4096);
+            .unwrap_or(3000);
+        let llama_ctx_pool = std::env::var("LLAMA_CLI_CTX_POOL")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(3);
         let llama_max_tokens = std::env::var("LLAMA_CLI_MAX_TOKENS")
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
@@ -109,6 +113,7 @@ impl ModelManager {
                 llama_top_k,
                 llama_gpu_layers,
                 llama_threads,
+                llama_ctx_pool,
             )?),
             _ => {
                 return Err(anyhow!(

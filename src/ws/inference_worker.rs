@@ -65,7 +65,7 @@ fn should_generate_summary(history: &[Message]) -> bool {
 
 async fn worker_loop(mut rx: mpsc::Receiver<InferenceJob>) {
     while let Some(job) = rx.recv().await {
-        process_job(job).await;
+        tokio::spawn(process_job(job));
     }
 }
 async fn process_job(job: InferenceJob) {

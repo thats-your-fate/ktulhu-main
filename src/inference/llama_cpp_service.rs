@@ -455,9 +455,11 @@ impl ContextPool {
     fn new(contexts: Vec<LlamaContext>) -> Self {
         let handles: VecDeque<_> = contexts
             .into_iter()
-            .map(|ctx| Arc::new(ContextHandle {
-                ctx: Mutex::new(ctx),
-            }))
+            .map(|ctx| {
+                Arc::new(ContextHandle {
+                    ctx: Mutex::new(ctx),
+                })
+            })
             .collect();
         Self {
             inner: Arc::new(ContextPoolInner {
@@ -482,12 +484,7 @@ impl ContextPool {
 }
 
 impl ContextLease {
-    fn run(
-        &self,
-        prompt: &str,
-        cancel: Arc<AtomicBool>,
-        tx: mpsc::Sender<String>,
-    ) -> Result<()> {
+    fn run(&self, prompt: &str, cancel: Arc<AtomicBool>, tx: mpsc::Sender<String>) -> Result<()> {
         let ctx = self
             .ctx
             .as_ref()

@@ -1,14 +1,27 @@
 # Ktulhu Main
 
-Multi-model inference server that powers the conversational Ktulhu experience. The binary exposes WebSocket streaming chat, authenticated REST APIs, Stripe-powered upgrades, and an internal admin surface on top of local `llama.cpp` models, a RoBERTa intent router, and a RocksDB chat store.
+**Rust-based conversational inference platform with deterministic intent routing.**
+
+Ktulhu Main is the core backend powering the conversational Ktulhu system. It combines a high-performance Rust service with local LLM inference through `llama.cpp`, a fine-tuned XLM-RoBERTa intent router, and persistent chat storage via RocksDB.
+
+Instead of relying entirely on the language model to infer user intent, Ktulhu first classifies incoming messages using a lightweight intent router. The router determines conversational context (phatic vs contentful) and several behavioral attributes before dynamically assembling optimized prompts. This architecture improves response consistency, reduces unnecessary generation work, and enables predictable conversational behavior even when running smaller quantized models.
+
+The server exposes real-time WebSocket chat, authenticated REST APIs, Stripe-powered upgrades, and internal administrative tooling. It supports web and native clients while remaining fully self-hosted and hardware-flexible.
+
+---
 
 ## Highlights
-- Streaming inference through `llama.cpp` with configurable context pools, sampling knobs, and back-pressure aware workers.
-- Multi-surface API: WebSocket chat (`/ws`), customer-facing REST under `/external/api`, internal admin tools under `/internal`, and auth/payment helpers.
-- On-disk persistence via RocksDB (`chatdb`) for chats, messages, users, and device indexes so state survives restarts.
-- Intent routing powered by a fine-tuned XLM-RoBERTa checkpoint plus custom heuristics to pick prompt templates, reasoning modes, and support escalation paths.
-- Optional automation: a local agent CLI can execute shell/file tools by prompting the same mistral backend.
 
+- **Streaming LLM inference** through `llama.cpp`, with configurable context pools, sampling controls, and back-pressure aware worker scheduling.
+- **Deterministic intent routing** using a fine-tuned XLM-RoBERTa classifier that decomposes user messages into conversational attributes before generation.
+- **Dynamic prompt assembly** with language-aware prompt fragments and reasoning modes, improving output quality while keeping the base model unchanged.
+- **Hardware-flexible inference runtime** supporting CPU-only deployments, single-GPU setups, and multi-GPU configurations through quantized GGUF models.
+- **Multi-surface API architecture** with WebSocket chat (`/ws`), customer-facing REST APIs under `/external/api`, internal admin tools under `/internal`, and authentication/payment helpers.
+- **Persistent chat storage** via RocksDB (`chatdb`) storing users, messages, chats, and device indexes so state survives restarts.
+- **Multilingual prompt orchestration** with device-side language detection and language-specific prompt components stored under `lang/`.
+- **Optional automation layer** where a local agent CLI can execute shell or file-system tools by routing tasks through the same Mistral inference backend.
+
+  
 ## Repository Layout
 - `src/main.rs` – application entry point, router composition, and shared state wiring.
 - `src/manager.rs` – discovers llama.cpp binaries/models, intent router checkpoints, and exposes `ModelManager` handles.
@@ -24,20 +37,90 @@ Multi-model inference server that powers the conversational Ktulhu experience. T
 ## Runtime Architecture
 ```
 Clients (web/app) ──HTTP/WebSocket──> Axum router (src/main.rs)
-    ↳ /api/auth/* ───> OAuth & email flows → JWT minting
-    ↳ /ws ──> ws::handler (register/prompt/cancel)
-            ↳ classifier (intent_router + heuristics)
-            ↳ InferenceWorker queue → llama.cpp contexts
-            ↳ DBLayer (chat persistence + summaries)
-    ↳ /external/api/* ─> token-gated one-shot completions & usage
-    ↳ /internal/* ─> admin dashboards, device/chat inspectors
-    ↳ /payment/* ─> Stripe Checkout helper (optional)
+↳ /api/auth/* ───> OAuth & email flows → JWT minting
+
+↳ /ws ──> ws::handler (register / prompt / cancel)
+        ↳ language hint from device metadata
+        ↳ intent router (XLM-RoBERTa + heuristics)
+            ↳ phatic vs contentful split
+            ↳ speech act classification
+            ↳ domain classification
+            ↳ expectation detection
+            ↳ optional support intent detection
+        ↳ prompt assembly
+            ↳ language-aware templates (lang/*)
+            ↳ reasoning profile selection
+            ↳ domain / expectation modifiers
+        ↳ InferenceWorker queue
+            ↳ llama.cpp context pool
+            ↳ streaming token generation
+        ↳ DBLayer
+            ↳ message persistence
+            ↳ conversation summaries
+
+↳ /external/api/* ─> token-gated one-shot completions & usage reporting
+
+↳ /internal/* ─> admin dashboards, device/chat inspectors
+
+↳ /payment/* ─> Stripe Checkout helper (optional)
 ```
-Key supporting services:
-- **ModelManager** preloads llama.cpp contexts and the RoBERTa classifier, exposing Arc handles reused across threads.
-- **InferenceService** streams tokens or full completions to both REST and WS surfaces while honoring cancellation flags.
-- **DBLayer** centralizes RocksDB reads/writes, including indices that map devices/users to chats and message likes.
-- **Prompts & attachments** convert stored history into chat templates, add attachment summaries, and keep responses clean.
+### Supporting Services
+
+**ModelManager**
+
+- Preloads llama.cpp inference contexts and the XLM-RoBERTa classifier.
+- Exposes shared `Arc` handles reused across worker threads.
+- Enables hardware-flexible deployments (CPU, single GPU, or multi-GPU).
+
+**InferenceService**
+
+- Streams tokens or full completions to both WebSocket and REST clients.
+- Coordinates inference workers and honors cancellation signals.
+- Applies prompt templates and sampling configuration before generation.
+
+**Intent Router**
+
+- Fine-tuned XLM-RoBERTa classifier with multiple prediction heads.
+- Determines conversational intent before LLM generation.
+- Predicts several conversational attributes:
+
+  - speech act (SOCIAL / ASKING / DIRECTING / EXPRESSING / SHARING)
+  - domain (technical, personal, legal, social, etc.)
+  - expectation (INFO / ADVICE / ACTION / NONE)
+  - optional support intent
+  - phatic vs contentful conversation
+
+- Routing decisions determine:
+
+  - final conversational intent
+  - prompt template selection
+  - reasoning profile activation
+  - task vs chat execution path
+
+**Prompt Assembly**
+
+- Prompt fragments are stored under `lang/` for multilingual support.
+- Language detection is performed client-side and passed as metadata.
+- Prompt templates are dynamically assembled from:
+
+  - language
+  - intent router decisions
+  - reasoning profiles
+  - conversation history
+
+- This approach improves response consistency without modifying the base LLM.
+
+**DBLayer**
+
+- Centralizes RocksDB reads/writes.
+- Stores chats, messages, users, and device mappings.
+- Maintains indices linking users/devices to conversation histories.
+- Enables persistence across server restarts.
+
+**Automation Layer (optional)**
+
+- A local agent CLI can execute shell or file-system operations.
+- Tool results can be routed back through the same inference pipeline.
 
 ### Mermaid Overview
 ```mermaid

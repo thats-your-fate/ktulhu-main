@@ -254,5 +254,3 @@ All internal routes sit behind middleware that checks `require_internal_auth` (s
 - `docs/frontend_payment.md` – frontend checklist for integrating the Stripe helper.
 - `chat_template.jinja` – tweak this to change how history/system prompts feed the GGUF checkpoint.
 - `config/allowed_origins.txt`, `config/llamacpp.env`, `config/payment.env` – edit & source these instead of hard-coding values in `.env` when possible.
-
-With the README in place you can onboard contributors quickly: start llama.cpp, point to a GGUF, add Stripe keys if needed, run `cargo run`, and connect either with the browser client or the standalone agent CLI.
